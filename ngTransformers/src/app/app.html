@@ -1,0 +1,11 @@
+<div>
+  <h1>Hello Transformers.js!</h1>
+  <textarea [(ngModel)]="inputText" rows="3" cols="50" placeholder="Type something..."></textarea>
+  <button (click)="analyze()">Run Sentiment Analysis</button>
+
+  @if(result) {
+  <p>
+    Input: {{ result | json }}
+  </p>
+  }
+</div>
