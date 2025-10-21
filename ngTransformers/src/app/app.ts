@@ -15,13 +15,16 @@ import { SentimentService } from './sentiment.service';
 export class App {
   protected readonly title = signal('ngTransformers');
 
-  inputText = 'I love using Angular!';
-  result: any = "";
+  // Use signals for reactive state in zoneless mode
+  inputText = signal('I love using Angular!');
+  result = signal<any>('');
 
   #sentimentService: SentimentService = inject(SentimentService);
 
   async analyze() {
-    this.result = await this.#sentimentService.analyze(this.inputText);
+    const text = this.inputText();
+    const analysisResult = await this.#sentimentService.analyze(text);
+    this.result.set(analysisResult);
   }
 
 }

@@ -1,13 +1,13 @@
 <div>
-  <h1>Hello Transformers.js Sentitment Analysis!</h1>
+  <h1>Hello Transformers.js Sentiment Analysis!</h1>
   <textarea [(ngModel)]="inputText" rows="3" cols="50" placeholder="Type something..."></textarea>
   <button (click)="analyze()">
     Run Sentiment Analysis
   </button>
 
-  @if(result) {
+  @if(result()) {
   <p>
-    Input: {{ result | json }}
+    Input: {{ result() | json }}
   </p>
   }
 </div>
