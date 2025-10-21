@@ -25,9 +25,11 @@ jobs:
           node-version: '24'
           
       - name: Install dependencies
+        working-directory: ./ngTransformers
         run: npm install
         
       - name: Build
+        working-directory: ./ngTransformers
         run: npm run build -- --base-href /ngTransformers/
         
       - name: Setup Pages
@@ -36,7 +38,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./dist/ng-transformers/browser
+          path: ./ngTransformers/dist/ng-transformers/browser
           
       - name: Deploy to GitHub Pages
         id: deployment
