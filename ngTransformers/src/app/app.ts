@@ -1,30 +1,17 @@
-import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
-import { Component, inject, signal } from '@angular/core';
-import { SentimentService } from './sentiment.service';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
+import { RouterLink, RouterOutlet } from '@angular/router';
 
 @Component({
   selector: 'app-root',
-  imports: [
-    CommonModule,
-    FormsModule
-  ],
-  templateUrl: './app.html',
-  styleUrl: './app.scss'
+  imports: [RouterOutlet, RouterLink],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  template: `
+    <nav>
+      <a routerLink="/">Sentiment</a> |
+      <a routerLink="/sloth-rag">Sloth RAG</a>
+    </nav>
+    <hr />
+    <router-outlet />
+  `
 })
-export class App {
-  protected readonly title = signal('ngTransformers');
-
-  // Use signals for reactive state in zoneless mode
-  inputText = signal('I love using Angular!');
-  result = signal<any>('');
-
-  #sentimentService: SentimentService = inject(SentimentService);
-
-  async analyze() {
-    const text = this.inputText();
-    const analysisResult = await this.#sentimentService.analyze(text);
-    this.result.set(analysisResult);
-  }
-
-}
+export class App {}
