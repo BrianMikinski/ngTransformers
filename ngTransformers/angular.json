@@ -25,10 +25,24 @@
               {
                 "glob": "**/*",
                 "input": "public"
+              },
+              {
+                "glob": "pdf.worker.min.mjs",
+                "input": "node_modules/pdfjs-dist/build",
+                "output": "/"
               }
             ],
             "styles": [
               "src/styles.scss"
+            ],
+            "allowedCommonJsDependencies": [
+              "mammoth",
+              "jszip",
+              "lop",
+              "base64-js",
+              "dingbat-to-unicode",
+              "xmlbuilder",
+              "@xmldom/xmldom"
             ]
           },
           "configurations": {
