@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 
 export interface ExtractedDocument {
   name: string;
-  type: 'pdf' | 'word' | 'excel';
+  type: 'pdf' | 'word' | 'excel' | 'text' | 'markdown';
   text: string;
   ms: number;
 }
@@ -31,6 +31,13 @@ export class DocumentParserService {
     } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
       type = 'excel';
       text = await this.parseSpreadsheet(data);
+    } else if (ext === 'txt') {
+      type = 'text';
+      text = new TextDecoder().decode(data);
+    } else if (['md', 'markdown'].includes(ext)) {
+      // Kept as raw markdown: headings are useful structure for chunking later.
+      type = 'markdown';
+      text = new TextDecoder().decode(data);
     } else {
       throw new Error(`Unsupported file type: .${ext}`);
     }

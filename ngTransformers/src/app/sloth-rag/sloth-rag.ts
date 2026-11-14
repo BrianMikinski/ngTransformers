@@ -8,7 +8,7 @@ import { DocumentParserService, ExtractedDocument } from './document-parser.serv
     <h1>🦥 Sloth RAG</h1>
     <p>Slow, in-browser document parsing. Nothing leaves your machine.</p>
 
-    <input type="file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv" (change)="onFiles($event)" />
+    <input type="file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.markdown" (change)="onFiles($event)" />
 
     @if (busy()) { <p>Parsing... (slowly)</p> }
 
