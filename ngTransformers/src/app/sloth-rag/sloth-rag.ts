@@ -1,5 +1,5 @@
 import {
-  Component, ChangeDetectionStrategy, Injector, afterNextRender, computed, inject, signal,
+  Component, ChangeDetectionStrategy, ElementRef, Injector, afterNextRender, computed, inject, signal,
 } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import { DocumentParserService, ExtractedDocument, SUPPORTED_EXTENSIONS } from './document-parser.service';
@@ -7,19 +7,24 @@ import { EmbeddingService } from './embedding.service';
 import { SqliteStoreService } from './sqlite-store.service';
 import { DuckDbService, SqlResult } from './duckdb.service';
 import {
-  ChunkRow, DocumentSummary, SearchHit, Segment, Span,
-  chunkText, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, splitSentences,
+  ChunkRow, DocumentSummary, SearchHit, Segment, Span, StoredDocument,
+  chunkSpans, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, splitSentences,
   toTableName, vectorGradient,
 } from './rag-utils';
+import { LineKind, ViewSheet, compactSheet, documentLines, sectionLabel, sections, sheetTables } from './document-view';
 
 const EMBED_BATCH = 16;
 const SEARCH_K = 10;
 /** all-MiniLM-L6-v2 cosine: ~0.3+ is usually related, ~0 is unrelated. */
 const MIN_SENTENCE_SIMILARITY = 0.25;
 const DEV_MODE_KEY = 'sloth-rag.devMode';
+const SHEET_EXTENSIONS = ['xlsx', 'xls', 'csv'];
+/** Shipped in public/samples. */
+const SAMPLES = ['employee-handbook.pdf', 'kestrel-status.md', 'offsite-notes.docx', 'q3-sales.xlsx', 'sloth-facts.txt'];
 
-type Stage = 'queued' | 'parsing' | 'tables' | 'embedding' | 'saving' | 'ready' | 'warn' | 'error';
+type Stage = 'queued' | 'parsing' | 'embedding' | 'saving' | 'ready' | 'warn' | 'error';
 type MobileTab = 'library' | 'ask' | 'source';
+type InspectorTab = 'document' | 'sql' | 'passages';
 
 /** Import progress for a file added in this session. */
 interface ImportState {
@@ -41,11 +46,14 @@ export interface LibraryItem {
   chars?: number;
   ms?: number;
   indexed: boolean;
+  hasText: boolean;
 }
 
 export interface DisplayHit extends SearchHit {
   segments: Segment[];
   sentenceScore?: number;
+  /** Spreadsheet hits render as small tables instead of CSV text. */
+  sheets?: ViewSheet[];
 }
 
 interface DisplayChunk extends ChunkRow {
@@ -53,7 +61,7 @@ interface DisplayChunk extends ChunkRow {
   preview: string;
 }
 
-const ACTIVE: Stage[] = ['queued', 'parsing', 'tables', 'embedding', 'saving'];
+const ACTIVE: Stage[] = ['queued', 'parsing', 'embedding', 'saving'];
 
 @Component({
   selector: 'app-sloth-rag',
@@ -74,6 +82,7 @@ export class SlothRag {
   #store = inject(SqliteStoreService);
   #duck = inject(DuckDbService);
   #injector = inject(Injector);
+  #host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   readonly accept = SUPPORTED_EXTENSIONS.map(e => '.' + e).join(',');
   readonly storage = this.#store.state;
@@ -89,9 +98,11 @@ export class SlothRag {
   chunkCount = computed(() => this.documents().reduce((n, d) => n + d.chunks, 0));
   notice = signal('');
   confirmClear = signal(false);
+  samplesLoading = signal(false);
 
   // Ask
   query = signal('');
+  terms = signal<string[]>([]);
   results = signal<DisplayHit[]>([]);
   searched = signal(false);
   searching = signal(false);
@@ -103,16 +114,49 @@ export class SlothRag {
   // Inspector
   selectedDoc = signal<string | undefined>(undefined);
   selectedHit = signal<DisplayHit | undefined>(undefined);
-  inspectorTab = signal<'text' | 'table'>('text');
+  inspectorTab = signal<InspectorTab>('document');
+  storedDoc = signal<StoredDocument | undefined>(undefined);
+  docLoading = signal(false);
   docChunks = signal<DisplayChunk[]>([]);
-  extracted = signal<Record<string, ExtractedDocument>>({});
   docTables = signal<Record<string, string[]>>({});
+  tablesLoading = signal(false);
   selectedTable = signal<string | undefined>(undefined);
   sql = signal('');
   sqlResult = signal<SqlResult | undefined>(undefined);
   sqlRunning = signal(false);
   selectedItem = computed(() => this.library().find(i => i.name === this.selectedDoc()));
   selectedTables = computed(() => this.docTables()[this.selectedDoc() ?? ''] ?? []);
+  isSheet = computed(() => SHEET_EXTENSIONS.includes(this.selectedItem()?.ext ?? ''));
+  /** The selected hit, positioned in the stored document (legacy rows have no offsets). */
+  highlight = computed(() => {
+    const hit = this.selectedHit(), doc = this.storedDoc();
+    if (!hit || !doc || hit.docName !== doc.name || hit.start === undefined || hit.end === undefined) return undefined;
+    return { start: hit.start, end: hit.end, segments: hit.segments };
+  });
+  viewLines = computed(() => {
+    const doc = this.storedDoc();
+    if (!doc || this.isSheet()) return [];
+    return documentLines(doc.text, { markdown: doc.type === 'markdown', highlight: this.highlight() });
+  });
+  viewSheets = computed(() => {
+    const doc = this.storedDoc();
+    if (!doc || !this.isSheet()) return [];
+    return sheetTables(doc.text, { terms: this.selectedHit() ? this.terms() : [], hit: this.highlight() });
+  });
+
+  /** Light document styling per line kind (Markdown headings, lists, quotes, code; PDF pages). */
+  readonly lineClass: Record<LineKind, string> = {
+    section: 'mt-6 mb-2 border-b border-line pb-1 text-[11px] font-medium tracking-wide text-subtle uppercase first:mt-0',
+    h1: 'mt-4 mb-1 text-xl font-semibold whitespace-pre-wrap',
+    h2: 'mt-3 mb-1 text-lg font-semibold whitespace-pre-wrap',
+    h3: 'mt-2 font-semibold whitespace-pre-wrap',
+    li: 'pl-4 -indent-4 whitespace-pre-wrap',
+    quote: 'border-l-2 border-line pl-3 text-muted whitespace-pre-wrap',
+    code: 'bg-surface px-3 font-mono text-xs whitespace-pre',
+    hr: 'text-subtle',
+    p: 'whitespace-pre-wrap',
+    blank: 'h-3',
+  };
 
   // Chrome
   devMode = signal(readDevMode());
@@ -162,6 +206,22 @@ export class SlothRag {
     this.enqueue(files);
   }
 
+  /** Fetch the bundled sample documents and import them like dropped files. */
+  async loadSamples() {
+    this.samplesLoading.set(true);
+    try {
+      const files = await Promise.all(SAMPLES.map(async name => {
+        const res = await fetch(new URL(`samples/${name}`, document.baseURI));
+        if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+        return new File([await res.blob()], name);
+      }));
+      this.enqueue(files);
+    } catch (e) {
+      this.#error('Sample documents', e);
+    }
+    this.samplesLoading.set(false);
+  }
+
   enqueue(files: File[]) {
     if (!files.length) return;
     this.imports.update(all => {
@@ -182,7 +242,7 @@ export class SlothRag {
     this.#processing = false;
   }
 
-  /** Parse → (DuckDB for spreadsheets) → chunk → embed → SQLite. Never throws; records the outcome. */
+  /** Parse → chunk → embed → SQLite (text + passages). Never throws; records the outcome. */
   async #import(file: File) {
     const name = file.name;
     const start = performance.now();
@@ -193,13 +253,12 @@ export class SlothRag {
     try {
       this.#setImport(name, { stage: 'parsing', progress: 'Reading…' });
       const doc = await this.#parser.parse(file);
-      this.extracted.update(x => ({ ...x, [name]: doc }));
 
-      if (doc.sheets) {
-        this.#setImport(name, { stage: 'tables', progress: 'Loading tables (first time downloads ~34MB)…' });
-        const failures = await this.#loadSheets(doc);
-        failures.forEach(warn);
+      for (const sheet of doc.sheets ?? []) {
+        if (!sheet.csv.trim()) warn(`Sheet "${sheet.name}" is empty`);
       }
+      // Re-added spreadsheet: drop stale DuckDB tables so SQL reloads the new data.
+      await this.#dropTables(name);
 
       if (!doc.text.trim()) {
         warn(`No text found${doc.type === 'pdf' ? ' (scanned or image-only PDF?)' : ''}, nothing indexed`);
@@ -212,40 +271,22 @@ export class SlothRag {
       console.error(`[sloth-rag] import failed for ${name}`, e);
     }
     this.#setImport(name, { stage, progress: undefined, details, ms: Math.round(performance.now() - start) });
+    if (this.selectedDoc() === name) this.#reloadInspector(name);
   }
 
   async #index(doc: ExtractedDocument) {
-    const chunks = chunkText(doc.text);
+    const spans = chunkSpans(doc.text);
+    const secs = sections(doc.text);
     const vectors: Float32Array[] = [];
-    for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
-      this.#setImport(doc.name, { stage: 'embedding', progress: `Embedding ${i}/${chunks.length} passages…` });
-      vectors.push(...await this.#embedder.embed(chunks.slice(i, i + EMBED_BATCH)));
+    for (let i = 0; i < spans.length; i += EMBED_BATCH) {
+      this.#setImport(doc.name, { stage: 'embedding', progress: `Embedding ${i}/${spans.length} passages…` });
+      vectors.push(...await this.#embedder.embed(spans.slice(i, i + EMBED_BATCH).map(s => s.text)));
     }
     this.#setImport(doc.name, { stage: 'saving', progress: 'Saving…' });
-    await this.#store.replaceDocument(doc.name, chunks.map((text, index) => ({ index, text, vector: vectors[index] })));
-  }
-
-  /** Returns warnings for sheets that couldn't be loaded. */
-  async #loadSheets(doc: ExtractedDocument): Promise<string[]> {
-    const isCsv = doc.name.toLowerCase().endsWith('.csv');
-    const failures: string[] = [];
-    const tables: string[] = [];
-    for (const sheet of doc.sheets!) {
-      const label = isCsv ? 'CSV' : `Sheet "${sheet.name}"`;
-      if (!sheet.csv.trim()) {
-        failures.push(`${label} is empty, skipped`);
-        continue;
-      }
-      const table = toTableName(doc.name, isCsv ? undefined : sheet.name);
-      try {
-        await this.#duck.loadCsv(table, sheet.csv);
-        tables.push(table);
-      } catch (e) {
-        failures.push(`${label} couldn't be loaded as a table: ${message(e)}`);
-      }
-    }
-    this.docTables.update(t => ({ ...t, [doc.name]: tables }));
-    return failures;
+    await this.#store.replaceDocument(
+      { name: doc.name, type: doc.type, text: doc.text, sheets: doc.sheets },
+      spans.map((s, index) => ({ ...s, index, section: sectionLabel(secs, s.start, s.end), vector: vectors[index] })),
+    );
   }
 
   #setImport(name: string, patch: Partial<ImportState>) {
@@ -257,13 +298,11 @@ export class SlothRag {
   async removeDocument(name: string) {
     try {
       await this.#store.deleteDocument(name);
-      await this.#duck.dropTables(this.docTables()[name] ?? []);
+      await this.#dropTables(name);
     } catch (e) {
       this.#error(`Remove ${name}`, e);
     }
     this.imports.update(({ [name]: _, ...rest }) => rest);
-    this.extracted.update(({ [name]: _, ...rest }) => rest);
-    this.docTables.update(({ [name]: _, ...rest }) => rest);
     this.results.update(r => r.filter(h => h.docName !== name));
     if (this.selectedDoc() === name) this.closeInspector();
     await this.#refreshIndex();
@@ -285,7 +324,6 @@ export class SlothRag {
       this.#error('Clear', e);
     }
     this.imports.set({});
-    this.extracted.set({});
     this.docTables.set({});
     this.results.set([]);
     this.searched.set(false);
@@ -309,6 +347,7 @@ export class SlothRag {
   toggleDevMode() {
     this.devMode.update(v => !v);
     try { localStorage.setItem(DEV_MODE_KEY, String(this.devMode())); } catch { /* storage blocked: session only */ }
+    if (!this.devMode() && this.inspectorTab() === 'passages') this.inspectorTab.set('document');
   }
 
   // ---------- Ask ----------
@@ -321,14 +360,16 @@ export class SlothRag {
     try {
       const [vector] = await this.#embedder.embed([query]);
       const hits = await this.#store.search(query, vector, SEARCH_K);
+      const isSheet = (h: SearchHit) => SHEET_EXTENSIONS.includes(fileExtension(h.docName));
 
-      // Semantic highlight: embed each sentence of each strong hit, mark the one closest to the query.
-      // Weak hits are skipped: embedding runs on the main thread, and ~10 sentences per hit adds up fast.
-      const sentences = hits.map(h => isStrongHit(h) ? splitSentences(h.text) : []);
+      // Semantic highlight: embed each sentence of each strong text hit, mark the one closest to the query.
+      // (Sentences mean nothing in CSV, and weak hits aren't worth the time.)
+      const sentences = hits.map(h => isStrongHit(h) && !isSheet(h) ? splitSentences(h.text) : []);
       const toEmbed = sentences.flatMap((ss, i) => ss.length > 1 ? ss.map(s => hits[i].text.slice(s.start, s.end)) : []);
-      const sentenceVectors = toEmbed.length ? await this.#embedder.embed(toEmbed) : [];
+      const sentenceVectors = await this.#embedder.embed(toEmbed);
 
       const terms = queryTerms(query);
+      this.terms.set(terms);
       let next = 0;
       this.results.set(hits.map((hit, i) => {
         let best: (Span & { score: number }) | undefined;
@@ -340,7 +381,12 @@ export class SlothRag {
         }
         // Only highlight a sentence that's actually related; otherwise the "best" of bad options misleads.
         const semantic = best && best.score >= MIN_SENTENCE_SIMILARITY ? best : undefined;
-        return { ...hit, segments: highlightSegments(hit.text, terms, semantic), sentenceScore: best?.score };
+        return {
+          ...hit,
+          segments: highlightSegments(hit.text, terms, semantic),
+          sentenceScore: best?.score,
+          sheets: isSheet(hit) ? sheetTables(hit.text, { terms, header: false }).map(t => compactSheet(t)) : undefined,
+        };
       }));
       this.searched.set(true);
     } catch (e) {
@@ -353,11 +399,10 @@ export class SlothRag {
 
   async openHit(hit: DisplayHit) {
     this.selectedHit.set(hit);
-    this.inspectorTab.set('text');
-    await this.#selectDoc(hit.docName);
+    if (this.inspectorTab() === 'sql') this.inspectorTab.set('document');
     this.mobileTab.set('source');
-    afterNextRender(() => document.getElementById(`chunk-${hit.id}`)?.scrollIntoView({ block: 'center' }),
-      { injector: this.#injector });
+    await this.#selectDoc(hit.docName);
+    this.#scrollToHit();
   }
 
   async openDocument(name: string) {
@@ -366,19 +411,28 @@ export class SlothRag {
       return;
     }
     this.selectedHit.set(undefined);
-    const tables = this.docTables()[name] ?? [];
-    this.inspectorTab.set(tables.length ? 'table' : 'text');
-    await this.#selectDoc(name);
-    if (tables.length) await this.previewTable(tables[0]);
+    this.inspectorTab.set('document');
     this.mobileTab.set('source');
+    await this.#selectDoc(name);
+    this.#host.nativeElement.querySelector('#inspector')?.scrollTo({ top: 0 });
   }
 
   closeInspector() {
     this.selectedDoc.set(undefined);
     this.selectedHit.set(undefined);
+    this.storedDoc.set(undefined);
     this.docChunks.set([]);
     this.sqlResult.set(undefined);
     this.selectedTable.set(undefined);
+  }
+
+  async setTab(tab: InspectorTab) {
+    this.inspectorTab.set(tab);
+    const name = this.selectedDoc();
+    if (!name) return;
+    if (tab === 'sql') await this.#ensureTables(name);
+    if (tab === 'passages') await this.#loadChunks(name);
+    if (tab === 'document' && this.highlight()) this.#scrollToHit();
   }
 
   async previewTable(table: string) {
@@ -399,15 +453,38 @@ export class SlothRag {
   }
 
   async #selectDoc(name: string) {
-    if (this.selectedDoc() === name && this.docChunks().length) return;
+    if (this.selectedDoc() === name && (this.storedDoc() || this.docChunks().length)) return;
     this.selectedDoc.set(name);
+    this.storedDoc.set(undefined);
+    this.docChunks.set([]);
     this.sqlResult.set(undefined);
     this.selectedTable.set(undefined);
-    this.docChunks.set([]);
+    await this.#reloadInspector(name);
+  }
+
+  /** Loads the stored document; documents indexed before full-text storage fall back to passages. */
+  async #reloadInspector(name: string) {
     const item = this.library().find(i => i.name === name);
     if (!item?.indexed) return;
+    this.docLoading.set(true);
+    try {
+      const doc = await this.#store.document(name);
+      if (this.selectedDoc() !== name) return;
+      this.storedDoc.set(doc);
+      if (!doc || this.inspectorTab() === 'passages') await this.#loadChunks(name);
+      if (this.inspectorTab() === 'sql') await this.#ensureTables(name);
+    } catch (e) {
+      this.#error(`Load ${name}`, e);
+    } finally {
+      this.docLoading.set(false);
+    }
+  }
+
+  async #loadChunks(name: string) {
+    if (this.docChunks().length) return;
     try {
       const rows = await this.#store.chunks(name);
+      if (this.selectedDoc() !== name) return;
       this.docChunks.set(rows.map(r => ({
         ...r,
         gradient: vectorGradient(r.vector),
@@ -416,6 +493,45 @@ export class SlothRag {
     } catch (e) {
       this.#error(`Load ${name}`, e);
     }
+  }
+
+  /** DuckDB tables are in-memory, so they're (re)built from the stored sheets the first time SQL is opened. */
+  async #ensureTables(name: string) {
+    if (!this.docTables()[name]) {
+      const sheets = (this.storedDoc() ?? await this.#store.document(name))?.sheets;
+      if (!sheets) return; // indexed before sheets were stored
+      this.tablesLoading.set(true);
+      try {
+        const isCsv = name.toLowerCase().endsWith('.csv');
+        const tables: string[] = [];
+        for (const sheet of sheets.filter(s => s.csv.trim())) {
+          const table = toTableName(name, isCsv ? undefined : sheet.name);
+          await this.#duck.loadCsv(table, sheet.csv);
+          tables.push(table);
+        }
+        this.docTables.update(t => ({ ...t, [name]: tables }));
+      } catch (e) {
+        this.#error(`Load tables for ${name}`, e);
+      } finally {
+        this.tablesLoading.set(false);
+      }
+    }
+    const tables = this.docTables()[name] ?? [];
+    if (this.selectedDoc() === name && tables.length && !this.selectedTable()) await this.previewTable(tables[0]);
+  }
+
+  async #dropTables(name: string) {
+    const tables = this.docTables()[name];
+    if (!tables) return;
+    await this.#duck.dropTables(tables);
+    this.docTables.update(({ [name]: _, ...rest }) => rest);
+  }
+
+  #scrollToHit() {
+    afterNextRender(
+      () => this.#host.nativeElement.querySelector('#inspector [data-hit]')?.scrollIntoView({ block: 'center' }),
+      { injector: this.#injector },
+    );
   }
 
   // ---------- Helpers ----------
@@ -440,13 +556,13 @@ export function buildLibrary(documents: DocumentSummary[], imports: Record<strin
   for (const d of documents) {
     byName.set(d.docName, {
       name: d.docName, ext: fileExtension(d.docName), stage: 'ready', details: [],
-      chunks: d.chunks, chars: d.chars, indexed: true,
+      chunks: d.chunks, chars: d.chars, indexed: true, hasText: d.hasText,
     });
   }
   for (const imp of Object.values(imports)) {
     const indexed = byName.get(imp.name);
     byName.set(imp.name, {
-      ...indexed, name: imp.name, ext: fileExtension(imp.name), indexed: !!indexed,
+      ...indexed, name: imp.name, ext: fileExtension(imp.name), indexed: !!indexed, hasText: !!indexed?.hasText,
       stage: imp.stage, progress: imp.progress, details: imp.details, ms: imp.ms,
     });
   }

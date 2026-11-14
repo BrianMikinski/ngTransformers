@@ -1,41 +1,47 @@
 import { Injectable, signal } from '@angular/core';
-import { pipeline } from '@huggingface/transformers';
 
-/** Sentence embeddings in the browser. The model (~23MB) downloads on first use, then is browser-cached. */
+/**
+ * Sentence embeddings in a Web Worker (see embedding.worker.ts).
+ * The model (~23MB) downloads on first use, then is browser-cached.
+ */
 @Injectable({ providedIn: 'root' })
 export class EmbeddingService {
   /** Model download progress 0-100 while downloading, undefined otherwise. */
   readonly downloadProgress = signal<number | undefined>(undefined);
 
-  #extractor?: Promise<any>;
-  /** Calls run one at a time: background indexing and searches share one ONNX session. */
-  #queue: Promise<unknown> = Promise.resolve();
+  #worker?: Worker;
+  #pending = new Map<number, { resolve: (v: Float32Array[]) => void; reject: (e: Error) => void }>();
+  #nextId = 0;
 
   embed(texts: string[]): Promise<Float32Array[]> {
-    const run = this.#queue.then(async () => {
-      const extractor = await this.#load();
-      const output = await extractor(texts, { pooling: 'mean', normalize: true });
-      return (output.tolist() as number[][]).map(v => Float32Array.from(v));
+    if (!texts.length) return Promise.resolve([]);
+    const id = this.#nextId++;
+    return new Promise((resolve, reject) => {
+      this.#pending.set(id, { resolve, reject });
+      this.#getWorker().postMessage({ id, texts });
     });
-    this.#queue = run.catch(() => undefined);
-    return run;
   }
 
-  #load() {
-    return this.#extractor ??= (() => {
-      const files = new Map<string, { loaded: number; total: number }>();
-      return pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
-        progress_callback: (p: any) => {
-          if (p.status !== 'progress' || !p.total) return;
-          files.set(p.file, { loaded: p.loaded, total: p.total });
-          let loaded = 0, total = 0;
-          for (const f of files.values()) { loaded += f.loaded; total += f.total; }
-          this.downloadProgress.set(Math.round((loaded / total) * 100));
-        },
-      }).finally(() => this.downloadProgress.set(undefined));
-    })().catch(e => {
-      this.#extractor = undefined;
-      throw e;
-    });
+  #getWorker(): Worker {
+    if (this.#worker) return this.#worker;
+    const worker = new Worker(new URL('./embedding.worker', import.meta.url), { type: 'module' });
+    worker.onmessage = ({ data }) => {
+      if (data.event === 'progress') {
+        this.downloadProgress.set(data.progress);
+        return;
+      }
+      const p = this.#pending.get(data.id);
+      this.#pending.delete(data.id);
+      data.error ? p?.reject(new Error(data.error)) : p?.resolve(data.result);
+    };
+    worker.onerror = (e: ErrorEvent) => {
+      e.preventDefault();
+      for (const p of this.#pending.values()) p.reject(new Error(`Embedding worker failed: ${e.message || 'could not load'}`));
+      this.#pending.clear();
+      this.downloadProgress.set(undefined);
+      worker.terminate();
+      this.#worker = undefined;
+    };
+    return this.#worker = worker;
   }
 }

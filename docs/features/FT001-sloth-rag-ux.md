@@ -82,14 +82,27 @@ Notes from testing phase 1:
 - Import progress/errors live for the session only; after a reload the library shows what's in SQLite.
 - Mobile tab layout built but not yet checked on a real phone-sized viewport.
 
-### Phase 2 – Source viewer
+### Phase 2 – Source viewer ✅
 
-- [ ] Store the full extracted text (and PDF page numbers) so the inspector shows the real document,
-      not overlapping chunks; jump to the exact passage; "page 4" labels.
-- [ ] Render Markdown; show spreadsheets as tables in results instead of CSV blobs.
-- [ ] Move embeddings (transformers.js) into a Web Worker so the UI never freezes.
-- [ ] "Try with sample docs" button.
-- [ ] Persist DuckDB tables (re-load from stored sheets on startup).
+- [x] Store the full extracted text (and PDF page numbers) so the inspector shows the real document,
+      not overlapping chunks; jump to the exact passage; "Page 4" / "Pages 2–3" / "Sheet Sales" labels.
+      Passages are now exact slices of the document (`chunkSpans`) with stored start/end offsets.
+- [x] SQLite schema v2 (`PRAGMA user_version`): `documents` table + `start_pos`/`end_pos`/`section` on
+      chunks. Migrates v1 databases in place; old documents fall back to the passage view with a
+      "re-add to see the whole document" note.
+- [x] Light Markdown rendering (headings, lists, quotes, code) with the syntax dimmed, not removed, so
+      highlight offsets stay exact. PDFs keep their line breaks.
+- [x] Spreadsheets as tables: in results (matching rows first) and in the inspector (passage rows tinted).
+- [x] Embeddings (transformers.js) moved into a Web Worker: indexing and search no longer freeze the page.
+- [x] "Try with sample documents" (first run) / "Add sample documents" (library): five original docs in
+      `public/samples` covering PDF, Word, Excel, text and Markdown, about one fictional company.
+- [x] DuckDB tables persist: sheets are stored in SQLite and loaded into DuckDB the first time the SQL tab
+      is opened (so the ~34MB DuckDB download only happens when someone actually wants SQL).
+
+Notes from testing phase 2:
+- 5 sample docs index in ~2s with the page fully responsive (cached model).
+- "how many vacation days do I get" finds the handbook's "25 days of paid time off" with no word overlap.
+- Markdown inline syntax (`**bold**`, links) is still shown raw.
 
 ### Phase 3 – Answers (RAG)
 

@@ -1,5 +1,5 @@
 import { Injectable, signal } from '@angular/core';
-import { ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState } from './rag-utils';
+import { ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState, StoredDocument } from './rag-utils';
 
 const CHANNEL = 'sloth-rag-db';
 
@@ -26,11 +26,12 @@ export class SqliteStoreService {
   storage(): Promise<StorageState> { return this.#call('storage'); }
   count(): Promise<number> { return this.#call('count'); }
   documents(): Promise<DocumentSummary[]> { return this.#call('documents'); }
+  document(name: string): Promise<StoredDocument | undefined> { return this.#call('document', name); }
   chunks(docName: string, limit = 500): Promise<ChunkRow[]> { return this.#call('chunks', docName, limit); }
   deleteDocument(docName: string): Promise<void> { return this.#call('deleteDocument', docName); }
   clear(): Promise<void> { return this.#call('clear'); }
-  replaceDocument(docName: string, chunks: ChunkInput[]): Promise<void> {
-    return this.#call('replaceDocument', docName, chunks);
+  replaceDocument(doc: StoredDocument, chunks: ChunkInput[]): Promise<void> {
+    return this.#call('replaceDocument', doc, chunks);
   }
   search(query: string, queryVector: Float32Array, k = 5): Promise<SearchHit[]> {
     return this.#call('search', query, queryVector, k);

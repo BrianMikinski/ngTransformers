@@ -1,30 +1,38 @@
 import {
-  chunkText, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, reciprocalRankFusion, splitSentences, toFtsQuery, toTableName,
+  chunkSpans, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, reciprocalRankFusion, splitSentences, toFtsQuery, toTableName,
   vectorGradient,
 } from './rag-utils';
 
-describe('chunkText', () => {
+describe('chunkSpans', () => {
   it('returns nothing for empty or whitespace text', () => {
-    expect(chunkText('')).toEqual([]);
-    expect(chunkText('   \n\t ')).toEqual([]);
+    expect(chunkSpans('')).toEqual([]);
+    expect(chunkSpans('   \n\t ')).toEqual([]);
   });
 
-  it('keeps short text as a single chunk with whitespace collapsed', () => {
-    expect(chunkText('hello\n\n  sloth')).toEqual(['hello sloth']);
+  it('keeps short text as one exact slice of the original', () => {
+    const text = '  hello\n\n  sloth ';
+    expect(chunkSpans(text)).toEqual([{ text: 'hello\n\n  sloth', start: 2, end: 16 }]);
   });
 
   it('splits long text into overlapping chunks on word boundaries', () => {
     const words = Array.from({ length: 300 }, (_, i) => `w${i}`);
-    const chunks = chunkText(words.join(' '), 100, 20);
+    const text = words.join(' ');
+    const chunks = chunkSpans(text, 100, 20);
 
     expect(chunks.length).toBeGreaterThan(1);
     for (const c of chunks) {
-      expect(c.length).toBeLessThanOrEqual(100);
-      c.split(' ').forEach(w => expect(words).toContain(w)); // no split words
+      expect(c.text.length).toBeLessThanOrEqual(100);
+      expect(text.slice(c.start, c.end)).toBe(c.text);
+      c.text.split(' ').forEach(w => expect(words).toContain(w)); // no split words
     }
     // Consecutive chunks overlap, and the last word is not lost.
-    expect(chunks[1].split(' ')).toContain(chunks[0].split(' ').at(-1));
-    expect(chunks.at(-1)!.endsWith('w299')).toBe(true);
+    expect(chunks[1].start).toBeLessThan(chunks[0].end);
+    expect(chunks.at(-1)!.text.endsWith('w299')).toBe(true);
+  });
+
+  it('always makes progress, even with words longer than the chunk size', () => {
+    const chunks = chunkSpans('a'.repeat(50) + ' ' + 'b'.repeat(50), 10, 5);
+    expect(chunks.map(c => c.text[0])).toEqual(['a', 'b']);
   });
 });
 

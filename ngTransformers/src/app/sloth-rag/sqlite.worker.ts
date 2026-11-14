@@ -6,18 +6,30 @@
  */
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import {
-  ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState, dot, reciprocalRankFusion, toFtsQuery,
+  ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState, StoredDocument, dot, reciprocalRankFusion,
+  toFtsQuery,
 } from './rag-utils';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS chunks (
-    id       INTEGER PRIMARY KEY,
-    doc_name TEXT    NOT NULL,
-    idx      INTEGER NOT NULL,
-    text     TEXT    NOT NULL,
-    vector   BLOB    NOT NULL
+    id        INTEGER PRIMARY KEY,
+    doc_name  TEXT    NOT NULL,
+    idx       INTEGER NOT NULL,
+    text      TEXT    NOT NULL,
+    vector    BLOB    NOT NULL,
+    start_pos INTEGER,          -- offsets into documents.text (NULL for rows from schema v1)
+    end_pos   INTEGER,
+    section   TEXT              -- "Page 3", "Sheet Sales", ...
   );
   CREATE INDEX IF NOT EXISTS chunks_doc ON chunks(doc_name);
+
+  CREATE TABLE IF NOT EXISTS documents (
+    name     TEXT PRIMARY KEY,
+    type     TEXT    NOT NULL,
+    text     TEXT    NOT NULL,
+    sheets   TEXT,              -- JSON [{name, csv}] for spreadsheets
+    added_at INTEGER NOT NULL
+  );
 
   CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='id');
   CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
@@ -27,6 +39,19 @@ const SCHEMA = `
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
   END;
 `;
+
+const SCHEMA_VERSION = 2;
+
+/** v1 → v2: passage offsets + section labels on chunks (the documents table is created by SCHEMA). */
+function migrate(db: any) {
+  const version: number = db.selectValue('PRAGMA user_version');
+  if (version >= SCHEMA_VERSION) return;
+  const columns: string[] = db.selectValues(`SELECT name FROM pragma_table_info('chunks')`);
+  for (const [col, type] of [['start_pos', 'INTEGER'], ['end_pos', 'INTEGER'], ['section', 'TEXT']]) {
+    if (!columns.includes(col)) db.exec(`ALTER TABLE chunks ADD COLUMN ${col} ${type}`);
+  }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
 
 const CANDIDATES = 20; // how many results each ranker contributes before fusion
 
@@ -74,6 +99,7 @@ function open() {
       storage = 'memory';
     }
     db.exec(SCHEMA);
+    migrate(db);
     emitState(storage);
     return { db, storage };
   })();
@@ -103,8 +129,19 @@ const api = {
 
   async documents(): Promise<DocumentSummary[]> {
     const { db } = await open();
-    return db.selectObjects(
-      'SELECT doc_name AS docName, count(*) AS chunks, sum(length(text)) AS chars FROM chunks GROUP BY doc_name ORDER BY doc_name');
+    return db.selectObjects(`
+      SELECT c.doc_name AS docName, count(*) AS chunks,
+             coalesce(length(d.text), sum(length(c.text))) AS chars,
+             d.type AS type, d.name IS NOT NULL AS hasText
+      FROM chunks c LEFT JOIN documents d ON d.name = c.doc_name
+      GROUP BY c.doc_name ORDER BY c.doc_name`)
+      .map((r: any) => ({ ...r, hasText: !!r.hasText, type: r.type ?? undefined }));
+  },
+
+  async document(name: string): Promise<StoredDocument | undefined> {
+    const { db } = await open();
+    const row = db.selectObject('SELECT name, type, text, sheets FROM documents WHERE name = ?', [name]);
+    return row && { name: row.name, type: row.type, text: row.text, sheets: row.sheets ? JSON.parse(row.sheets) : undefined };
   },
 
   async chunks(docName: string, limit = 200): Promise<ChunkRow[]> {
@@ -115,26 +152,34 @@ const api = {
 
   async deleteDocument(docName: string): Promise<void> {
     const { db } = await open();
-    db.exec({ sql: 'DELETE FROM chunks WHERE doc_name = ?', bind: [docName] });
+    db.transaction(() => {
+      db.exec({ sql: 'DELETE FROM chunks WHERE doc_name = ?', bind: [docName] });
+      db.exec({ sql: 'DELETE FROM documents WHERE name = ?', bind: [docName] });
+    });
     vectorCache = undefined;
   },
 
   async clear(): Promise<void> {
     const { db } = await open();
-    db.exec('DELETE FROM chunks');
+    db.exec('DELETE FROM chunks; DELETE FROM documents;');
     vectorCache = undefined;
   },
 
-  /** Replaces all chunks for a document, so re-uploading doesn't duplicate. */
-  async replaceDocument(docName: string, chunks: ChunkInput[]): Promise<void> {
+  /** Stores a document's text and replaces all its chunks, so re-uploading doesn't duplicate. */
+  async replaceDocument(doc: StoredDocument, chunks: ChunkInput[]): Promise<void> {
     const { db } = await open();
     db.transaction(() => {
-      db.exec({ sql: 'DELETE FROM chunks WHERE doc_name = ?', bind: [docName] });
-      const stmt = db.prepare('INSERT INTO chunks (doc_name, idx, text, vector) VALUES (?, ?, ?, ?)');
+      db.exec({ sql: 'DELETE FROM chunks WHERE doc_name = ?', bind: [doc.name] });
+      db.exec({
+        sql: 'INSERT OR REPLACE INTO documents (name, type, text, sheets, added_at) VALUES (?, ?, ?, ?, ?)',
+        bind: [doc.name, doc.type, doc.text, doc.sheets ? JSON.stringify(doc.sheets) : null, Date.now()],
+      });
+      const stmt = db.prepare(
+        'INSERT INTO chunks (doc_name, idx, text, vector, start_pos, end_pos, section) VALUES (?, ?, ?, ?, ?, ?, ?)');
       try {
         for (const c of chunks) {
           const blob = new Uint8Array(c.vector.buffer, c.vector.byteOffset, c.vector.byteLength);
-          stmt.bind([docName, c.index, c.text, blob]).stepReset();
+          stmt.bind([doc.name, c.index, c.text, blob, c.start, c.end, c.section ?? null]).stepReset();
         }
       } finally {
         stmt.finalize();
@@ -166,7 +211,7 @@ const api = {
     if (!top.length) return [];
 
     const rows: any[] = db.selectObjects(
-      `SELECT id, doc_name, idx, text FROM chunks WHERE id IN (${top.map(() => '?').join(',')})`,
+      `SELECT id, doc_name, idx, text, start_pos, end_pos, section FROM chunks WHERE id IN (${top.map(() => '?').join(',')})`,
       top.map(t => t.id));
     const rowById = new Map(rows.map(r => [r.id, r]));
 
@@ -176,6 +221,7 @@ const api = {
       const ki = byKeyword.indexOf(id);
       return {
         id, score, docName: row.doc_name, index: row.idx, text: row.text,
+        start: row.start_pos ?? undefined, end: row.end_pos ?? undefined, section: row.section ?? undefined,
         similarity: vi >= 0 ? byVector[vi].similarity : undefined,
         vectorRank: vi >= 0 ? vi + 1 : undefined,
         keywordRank: ki >= 0 ? ki + 1 : undefined,

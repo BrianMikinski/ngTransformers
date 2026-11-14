@@ -1,8 +1,9 @@
 import { Injectable } from '@angular/core';
+import { DocType } from './rag-utils';
 
 export interface ExtractedDocument {
   name: string;
-  type: 'pdf' | 'word' | 'excel' | 'text' | 'markdown';
+  type: DocType;
   text: string;
   ms: number;
   /** Spreadsheets only: one CSV per sheet, for loading into DuckDB. */
@@ -61,7 +62,12 @@ export class DocumentParserService {
     const pages: string[] = [];
     for (let i = 1; i <= pdf.numPages; i++) {
       const content = await (await pdf.getPage(i)).getTextContent();
-      const pageText = content.items.map(item => ('str' in item ? item.str : '')).join(' ');
+      // Keep pdf.js line breaks so the document viewer shows lines, not one blob per page.
+      const pageText = content.items
+        .map(item => ('str' in item ? item.str + (item.hasEOL ? '\n' : ' ') : ''))
+        .join('')
+        .replace(/[ \t]+\n/g, '\n')
+        .trim();
       pages.push(`--- Page ${i} ---\n${pageText}`);
     }
     return pages.join('\n\n');

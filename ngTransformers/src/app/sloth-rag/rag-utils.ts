@@ -1,10 +1,33 @@
-export interface ChunkInput {
+/** A passage of a document: `text` is exactly `doc.text.slice(start, end)`. */
+export interface ChunkSpan { text: string; start: number; end: number; }
+
+export interface ChunkInput extends ChunkSpan {
   index: number;
-  text: string;
+  /** "Page 3", "Pages 3–4", "Sheet Sales", or undefined for documents without sections. */
+  section?: string;
   vector: Float32Array;
 }
 
-export interface DocumentSummary { docName: string; chunks: number; chars: number; }
+export interface DocumentSummary {
+  docName: string;
+  chunks: number;
+  chars: number;
+  /** False for documents indexed before full text was stored (shown as passages only). */
+  hasText: boolean;
+  type?: DocType;
+}
+
+export type DocType = 'pdf' | 'word' | 'excel' | 'text' | 'markdown';
+
+/** A document's full extracted text, kept so the inspector can show the real document. */
+export interface StoredDocument {
+  name: string;
+  type: DocType;
+  text: string;
+  /** Spreadsheets only: one CSV per sheet, reloaded into DuckDB on demand. */
+  sheets?: { name: string; csv: string }[];
+}
+
 export interface ChunkRow { id: number; index: number; text: string; vector: Float32Array; }
 
 export interface SearchHit {
@@ -12,32 +35,37 @@ export interface SearchHit {
   docName: string;
   index: number;
   text: string;
+  start?: number;         // offsets into the stored document text (absent for legacy rows)
+  end?: number;
+  section?: string;
   score: number;          // fused (RRF) score
   similarity?: number;    // cosine similarity, if it ranked in the vector list
   vectorRank?: number;    // 1-based
   keywordRank?: number;   // 1-based
 }
 
-/** Naive character-window chunker that tries to break on spaces. */
-export function chunkText(text: string, size = 500, overlap = 100): string[] {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  const chunks: string[] = [];
-  let start = 0;
+/**
+ * Character-window chunker on word boundaries. Each chunk is an exact slice of the original text
+ * (whitespace kept), so its offsets can highlight it in the full document later.
+ * Consecutive chunks overlap by roughly `overlap` characters.
+ */
+export function chunkSpans(text: string, size = 500, overlap = 100): ChunkSpan[] {
+  const words = Array.from(text.matchAll(/\S+/g), m => ({ start: m.index!, end: m.index! + m[0].length }));
+  const chunks: ChunkSpan[] = [];
+  let i = 0;
+  while (i < words.length) {
+    let j = i;
+    while (j + 1 < words.length && words[j + 1].end - words[i].start <= size) j++;
+    const { start } = words[i], { end } = words[j];
+    chunks.push({ text: text.slice(start, end), start, end });
+    if (j + 1 >= words.length) break;
 
-  while (start < clean.length) {
-    let end = Math.min(start + size, clean.length);
-    if (end < clean.length) {
-      const lastSpace = clean.lastIndexOf(' ', end);
-      if (lastSpace > start + size / 2) end = lastSpace;
-    }
-    chunks.push(clean.slice(start, end).trim());
-    if (end >= clean.length) break;
-
-    // Step back by `overlap`, snapped forward to the next word boundary.
-    const next = clean.indexOf(' ', end - overlap);
-    start = next > start && next < end ? next + 1 : end;
+    // Next chunk starts with the words that begin in the last `overlap` characters of this one.
+    let k = j;
+    while (k - 1 > i && words[k - 1].start >= end - overlap) k--;
+    i = k > i && words[k].start >= end - overlap ? k : j + 1;
   }
-  return chunks.filter(c => c.length > 0);
+  return chunks;
 }
 
 /** Vectors are normalized at embed time, so the dot product is cosine similarity. */
@@ -62,7 +90,7 @@ export function reciprocalRankFusion(rankings: number[][], k = 60): { id: number
 const STOP_WORDS = new Set((
   'a an and are as at be but by can do does for from had has have how i if in into is it its me my no not of on ' +
   'or our so that the their them then there these they this those to was we were what when where which who why ' +
-  'will with you your'
+  'will with you your get got many much about'
 ).split(' '));
 
 /** Unique lowercase words from a query, minus stop words (unless that would leave nothing). */
