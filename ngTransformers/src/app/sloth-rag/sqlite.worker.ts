@@ -5,7 +5,9 @@
  * Hybrid search = FTS5 keyword ranking + brute-force cosine ranking, fused with RRF.
  */
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { ChunkInput, ChunkRow, DocumentSummary, SearchHit, dot, reciprocalRankFusion, toFtsQuery } from './rag-utils';
+import {
+  ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState, dot, reciprocalRankFusion, toFtsQuery,
+} from './rag-utils';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS chunks (
@@ -28,31 +30,69 @@ const SCHEMA = `
 
 const CANDIDATES = 20; // how many results each ranker contributes before fusion
 
-let dbPromise: Promise<{ db: any; storage: string }> | undefined;
+const LOCK_NAME = 'sloth-rag-db';
+
+let dbPromise: Promise<{ db: any; storage: StorageState }> | undefined;
 let vectorCache: { id: number; vector: Float32Array }[] | undefined;
+
+/** Tell the UI about storage changes (not tied to a request id). */
+function emitState(state: StorageState) {
+  postMessage({ event: 'state', state });
+}
+
+/**
+ * opfs-sahpool gives one tab exclusive access to the database file. A Web Lock makes that explicit:
+ * a second tab waits here (and says so) instead of silently falling back to memory. When the owning
+ * tab's worker is terminated ("Use here" in another tab), its lock is released and we get it.
+ */
+function acquireLock(): Promise<void> {
+  if (!navigator.locks) return Promise.resolve();
+  return new Promise<void>(acquired => {
+    const hold = () => { acquired(); return new Promise<void>(() => {}); }; // held until the worker dies
+    navigator.locks.request(LOCK_NAME, { ifAvailable: true }, lock => {
+      if (lock) return hold();
+      emitState('waiting');
+      return navigator.locks.request(LOCK_NAME, hold);
+    });
+  });
+}
 
 function open() {
   return dbPromise ??= (async () => {
     const sqlite3 = await sqlite3InitModule();
     let db: any;
-    let storage: string;
+    let storage: StorageState;
     try {
-      const pool = await sqlite3.installOpfsSAHPoolVfs({});
+      await acquireLock();
+      const pool = await installPool(sqlite3);
       db = new pool.OpfsSAHPoolDb('/sloth-rag.sqlite3');
-      storage = 'SQLite in OPFS (persistent)';
+      storage = 'persistent';
     } catch (e) {
-      // e.g. unsupported browser, or another tab already holds the OPFS pool.
+      // e.g. unsupported browser (no OPFS sync access handles).
       console.warn('[sloth-rag] OPFS unavailable, falling back to in-memory SQLite:', e);
       db = new sqlite3.oo1.DB(':memory:');
-      storage = 'SQLite in memory (NOT persistent - OPFS unavailable)';
+      storage = 'memory';
     }
     db.exec(SCHEMA);
+    emitState(storage);
     return { db, storage };
   })();
 }
 
+/** The previous owner's file handles can close a moment after its lock is released, so retry briefly. */
+async function installPool(sqlite3: any, attempts = 10): Promise<any> {
+  for (let i = 1; ; i++) {
+    try {
+      return await sqlite3.installOpfsSAHPoolVfs({ forceReinitIfPreviouslyFailed: true });
+    } catch (e) {
+      if (i >= attempts || !navigator.locks) throw e;
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+}
+
 const api = {
-  async storage(): Promise<string> {
+  async storage(): Promise<StorageState> {
     return (await open()).storage;
   },
 
@@ -71,6 +111,12 @@ const api = {
     const { db } = await open();
     return db.selectObjects('SELECT id, idx, text, vector FROM chunks WHERE doc_name = ? ORDER BY idx LIMIT ?', [docName, limit])
       .map((r: any) => ({ id: r.id, index: r.idx, text: r.text, vector: toFloat32(r.vector) }));
+  },
+
+  async deleteDocument(docName: string): Promise<void> {
+    const { db } = await open();
+    db.exec({ sql: 'DELETE FROM chunks WHERE doc_name = ?', bind: [docName] });
+    vectorCache = undefined;
   },
 
   async clear(): Promise<void> {

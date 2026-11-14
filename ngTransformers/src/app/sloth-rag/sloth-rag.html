@@ -1,201 +1,363 @@
-<section class="space-y-12">
+<div class="relative flex h-[calc(100dvh-3.5rem)] flex-col">
 
-  <!-- Hero -->
-  <div class="space-y-3">
-    <h1>Sloth RAG 🦥</h1>
-    <p class="max-w-2xl text-lg text-muted">
-      Slow, in-browser document parsing and search. PDFs, Word, Excel, text and Markdown, all processed
-      locally. Nothing leaves your machine.
-    </p>
-  </div>
-
-  <!-- Upload -->
-  <div class="card space-y-4">
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="text-sm">
-        <span class="font-medium">{{ chunkCount() }} chunks indexed</span>
-        <span class="text-subtle"> · {{ storage() }}</span>
+  <!-- Storage banner: loud whenever the library isn't being saved here -->
+  @switch (storage()) {
+    @case ('waiting') {
+      <div class="flex flex-wrap items-center justify-center gap-3 border-b border-line bg-warn-bg px-4 py-2 text-sm">
+        <span>Sloth RAG is open in another tab, and that tab has your library. Waiting for it to close…</span>
+        <button class="btn-primary btn-sm" (click)="useHere()">Use here</button>
       </div>
-      <button class="btn-secondary btn-sm" (click)="clearIndex()" [disabled]="busy()">Clear index</button>
-    </div>
-    <input type="file" multiple class="file-input" accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.markdown"
-           (change)="onFiles($event)" [disabled]="busy()" />
-    @if (status()) {
-      <p class="flex items-center gap-2 text-sm text-muted">
-        <span class="size-2 animate-pulse rounded-full bg-fg"></span>{{ status() }}
-      </p>
     }
-  </div>
-
-  @if (errors().length) {
-    <div class="flex items-start justify-between gap-4 rounded-2xl bg-danger-bg p-4 text-sm text-danger">
-      <div class="space-y-1">
-        @for (err of errors(); track $index) { <div>{{ err }}</div> }
+    @case ('moved') {
+      <div class="flex flex-wrap items-center justify-center gap-3 border-b border-line bg-warn-bg px-4 py-2 text-sm">
+        <span>Your library moved to another tab. This tab is paused.</span>
+        <button class="btn-primary btn-sm" (click)="useHere()">Use here</button>
       </div>
-      <button class="btn-ghost btn-sm" (click)="errors.set([])">Dismiss</button>
-    </div>
+    }
+    @case ('memory') {
+      <div class="border-b border-line bg-danger-bg px-4 py-2 text-center text-sm text-danger">
+        This browser can't save your library (no OPFS support). Everything is lost when you close or reload the page.
+      </div>
+    }
   }
 
-  <!-- Import log -->
-  @if (importLog().length) {
-    <div>
-      <div class="mb-4 flex items-center justify-between">
-        <h2>Import log</h2>
-        <button class="btn-ghost btn-sm" (click)="importLog.set([])">Clear</button>
-      </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <tr><th></th><th>File</th><th>Type</th><th>Result</th><th class="text-right">Time</th></tr>
-          @for (entry of importLog(); track $index) {
-            <tr [class.bg-danger-bg]="entry.status === 'error'" [class.bg-warn-bg]="entry.status === 'warn'">
-              <td>{{ entry.status === 'ok' ? '✅' : entry.status === 'warn' ? '⚠️' : '❌' }}</td>
-              <td class="font-medium">{{ entry.file }}</td>
-              <td class="text-muted">{{ entry.type ?? '-' }}</td>
-              <td>@for (line of entry.details; track $index) { <div>{{ line }}</div> }</td>
-              <td class="text-right text-muted tabular-nums">{{ entry.ms }} ms</td>
-            </tr>
-          }
-        </table>
-      </div>
-    </div>
-  }
+  <!-- Mobile: panes become tabs -->
+  <nav class="flex border-b border-line lg:hidden">
+    @for (t of ['library', 'ask', 'source']; track t) {
+      <button class="flex-1 cursor-pointer py-2.5 text-sm capitalize transition-colors"
+              [class]="mobileTab() === t ? 'border-b-2 border-fg font-medium text-fg' : 'text-muted'"
+              (click)="mobileTab.set($any(t))">
+        {{ t }}{{ t === 'library' && library().length ? ' (' + library().length + ')' : '' }}
+      </button>
+    }
+  </nav>
 
-  <!-- Search -->
-  <div>
-    <h2 class="mb-4">Search <span class="eyebrow">keyword + semantic</span></h2>
-    <div class="flex gap-2">
-      <input #q class="input" placeholder="Ask something about your documents..."
-             (keydown.enter)="search(q.value)" [disabled]="busy()" />
-      <button class="btn-primary h-10" (click)="search(q.value)" [disabled]="busy()">Search</button>
-    </div>
+  <div class="grid min-h-0 flex-1 lg:grid-cols-[260px_minmax(0,1fr)_360px] xl:grid-cols-[288px_minmax(0,1fr)_440px]">
 
-    @if (results().length) {
-      <p class="mt-4 text-xs text-subtle">
-        <mark>keyword match</mark> exact word from your query ·
-        <span class="rounded-sm bg-semantic px-0.5 underline decoration-dotted">best sentence</span>
-        closest in meaning to your query (similarity ≥ 0.25)
-      </p>
-      <div class="mt-4 space-y-3">
-        @for (r of results(); track r.id) {
-          <article class="card space-y-3">
-            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
-              <span class="rounded-full bg-fg px-2 py-0.5 font-medium text-bg tabular-nums">{{ r.score.toFixed(4) }}</span>
-              <span class="font-medium text-fg">{{ r.docName }}</span>
-              <span>chunk {{ r.index }}</span>
-              <span>semantic {{ r.vectorRank ? '#' + r.vectorRank + ' (' + r.similarity!.toFixed(3) + ')' : '-' }}</span>
-              <span>keyword {{ r.keywordRank ? '#' + r.keywordRank : '-' }}</span>
-              @if (r.sentenceScore !== undefined) { <span>best sentence {{ r.sentenceScore.toFixed(3) }}</span> }
+    <!-- ================= LIBRARY ================= -->
+    <aside class="flex min-h-0 flex-col border-line bg-surface lg:border-r"
+           [class.max-lg:hidden]="mobileTab() !== 'library'">
+      <div class="space-y-3 p-4">
+        <div class="flex items-baseline justify-between">
+          <h2 class="text-base">Library</h2>
+          <span class="text-xs text-subtle tabular-nums">{{ library().length }} docs · {{ chunkCount() }} passages</span>
+        </div>
+        <label class="flex cursor-pointer flex-col items-center gap-1 rounded-2xl border border-dashed border-line bg-bg px-4 py-5
+                      text-center transition-colors hover:border-fg">
+          <span class="text-sm font-medium">Add files</span>
+          <span class="text-xs text-subtle">or drop files and folders anywhere</span>
+          <span class="text-[11px] text-subtle">PDF · Word · Excel · CSV · Text · Markdown</span>
+          <input type="file" multiple class="sr-only" [accept]="accept" (change)="onFiles($event)" />
+        </label>
+        @if (notice()) { <p class="text-xs text-muted">{{ notice() }}</p> }
+        @if (modelProgress() !== undefined) {
+          <div class="space-y-1">
+            <div class="flex justify-between text-xs text-muted">
+              <span>Downloading embedding model (one time)</span><span class="tabular-nums">{{ modelProgress() }}%</span>
             </div>
-            <p class="text-sm leading-relaxed whitespace-pre-wrap">@for (s of r.segments; track $index) {<span
-                [class.bg-semantic]="s.semantic" [class.underline]="s.semantic" [class.decoration-dotted]="s.semantic"
-              >@if (s.keyword) {<mark>{{ s.text }}</mark>} @else {{{ s.text }}}</span>}</p>
-          </article>
-        }
-      </div>
-    }
-  </div>
-
-  <!-- Index browser -->
-  <div>
-    <h2 class="mb-4">Index browser <span class="eyebrow">SQLite</span></h2>
-    @if (documents().length) {
-      <div class="table-wrap">
-        <table class="data-table">
-          <tr><th>Document</th><th class="text-right">Chunks</th><th class="text-right">Chars</th><th></th></tr>
-          @for (d of documents(); track d.docName) {
-            <tr>
-              <td class="font-medium">{{ d.docName }}</td>
-              <td class="text-right tabular-nums">{{ d.chunks }}</td>
-              <td class="text-right tabular-nums">{{ d.chars }}</td>
-              <td class="text-right">
-                <button [class]="d.docName === selectedDoc() ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'"
-                        (click)="viewDocument(d.docName)">
-                  {{ d.docName === selectedDoc() ? 'Hide' : 'View chunks' }}
-                </button>
-              </td>
-            </tr>
-          }
-        </table>
-      </div>
-
-      @if (selectedDoc()) {
-        <div class="mt-6">
-          <h3>{{ selectedDoc() }} <span class="eyebrow">{{ docChunks().length }} chunks</span></h3>
-          <p class="mt-1 mb-3 text-xs text-subtle">
-            Embedding: 384 numbers per chunk, drawn left→right. Red = positive, blue = negative.
-          </p>
-          <div class="table-wrap max-h-[500px]">
-            <table class="data-table">
-              <tr><th>#</th><th>Text</th><th>Embedding</th><th>First values</th></tr>
-              @for (c of docChunks(); track c.id) {
-                <tr>
-                  <td class="text-muted tabular-nums">{{ c.index }}</td>
-                  <td class="max-w-md" [title]="c.text">{{ c.text.length > 160 ? c.text.slice(0, 160) + '…' : c.text }}</td>
-                  <td><div class="h-5 w-96 rounded-sm" [style.background]="c.gradient"></div></td>
-                  <td class="font-mono text-xs whitespace-nowrap text-muted">{{ c.preview }}</td>
-                </tr>
-              }
-            </table>
+            <div class="h-1 overflow-hidden rounded-full bg-line">
+              <div class="h-full bg-fg transition-all" [style.width.%]="modelProgress()"></div>
+            </div>
           </div>
-        </div>
-      }
-    } @else {
-      <p class="text-sm text-muted">Nothing indexed yet. Upload some files above.</p>
-    }
-  </div>
-
-  <!-- DuckDB -->
-  <div>
-    <h2 class="mb-4">Spreadsheet SQL <span class="eyebrow">DuckDB</span></h2>
-    @if (tables().length) {
-      <div class="card space-y-4">
-        <div class="flex flex-wrap gap-2">
-          @for (t of tables(); track t.table) {
-            <span class="rounded-full border border-line px-3 py-1 text-xs" [title]="t.columns">
-              <span class="font-medium">{{ t.table }}</span>
-              <span class="text-subtle"> · {{ t.columns }}</span>
-            </span>
-          }
-        </div>
-        <textarea #sql class="textarea font-mono" rows="4" [value]="'SELECT * FROM ' + tables()[0].table + ' LIMIT 10'"></textarea>
-        <button class="btn-primary" (click)="runSql(sql.value)" [disabled]="busy()">Run SQL</button>
+        }
       </div>
 
-      @if (sqlResult(); as r) {
-        <p class="mt-4 mb-2 text-xs text-subtle">
-          {{ r.total }} rows{{ r.total > r.rows.length ? ' (showing ' + r.rows.length + ')' : '' }}
-        </p>
-        <div class="table-wrap max-h-[400px]">
-          <table class="data-table">
-            <tr>@for (c of r.columns; track $index) { <th>{{ c }}</th> }</tr>
-            @for (row of r.rows; track $index) {
-              <tr>@for (v of row; track $index) { <td class="tabular-nums">{{ v }}</td> }</tr>
+      <ul class="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
+        @for (item of library(); track item.name) {
+          <li class="group relative">
+            <button class="flex w-full cursor-pointer items-start gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-surface-strong"
+                    [class.bg-surface-strong]="item.name === selectedDoc()"
+                    (click)="openDocument(item.name)">
+              <span class="mt-0.5 w-11 shrink-0 rounded-md border border-line bg-bg py-0.5 text-center text-[10px] font-medium uppercase text-muted">
+                {{ item.ext || '?' }}
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate pr-5 text-sm font-medium" [title]="item.name">{{ item.name }}</span>
+                @switch (item.stage) {
+                  @case ('ready') {
+                    <span class="block text-xs text-subtle">{{ item.chunks }} passages{{ devMode() && item.ms ? ' · ' + item.ms + ' ms' : '' }}</span>
+                  }
+                  @case ('warn') {
+                    <span class="block text-xs text-subtle">{{ item.indexed ? item.chunks + ' passages' : 'Not indexed' }}</span>
+                    @for (d of item.details; track $index) { <span class="block text-xs text-muted">⚠️ {{ d }}</span> }
+                  }
+                  @case ('error') {
+                    @for (d of item.details; track $index) { <span class="block text-xs text-danger">✕ {{ d }}</span> }
+                  }
+                  @default {
+                    <span class="flex items-center gap-1.5 text-xs text-muted">
+                      <span class="size-1.5 animate-pulse rounded-full bg-fg"></span>{{ item.progress ?? 'Queued' }}
+                    </span>
+                  }
+                }
+              </span>
+            </button>
+            @if (item.stage === 'error' && !item.indexed) {
+              <button class="absolute top-2 right-2 cursor-pointer rounded-full px-1.5 text-muted hover:bg-line hover:text-fg"
+                      title="Dismiss" (click)="dismissImport(item.name)">×</button>
+            } @else if (item.indexed && !indexing()) {
+              <button class="absolute top-2 right-2 hidden cursor-pointer rounded-full px-1.5 text-muted group-hover:block hover:bg-line hover:text-fg"
+                      title="Remove from library" (click)="removeDocument(item.name)">×</button>
             }
-          </table>
+          </li>
+        }
+      </ul>
+
+      <div class="space-y-3 border-t border-line p-4 text-xs">
+        <div class="flex items-center gap-2 text-muted">
+          <span class="size-2 rounded-full"
+                [class]="storage() === 'persistent' ? 'bg-green-500' : storage() === 'opening' ? 'bg-subtle' : 'bg-amber-500'"></span>
+          @switch (storage()) {
+            @case ('persistent') { Saved in this browser only }
+            @case ('opening') { Opening library… }
+            @case ('memory') { Not saved (memory only) }
+            @default { Paused: open in another tab }
+          }
+        </div>
+        <div class="flex items-center justify-between">
+          <label class="flex cursor-pointer items-center gap-2 text-muted">
+            <button role="switch" [attr.aria-checked]="devMode()" (click)="toggleDevMode()"
+                    class="relative h-4 w-7 cursor-pointer rounded-full transition-colors"
+                    [class]="devMode() ? 'bg-fg' : 'bg-line'">
+              <span class="absolute top-0.5 size-3 rounded-full bg-bg transition-all"
+                    [class]="devMode() ? 'left-3.5' : 'left-0.5'"></span>
+            </button>
+            Developer mode
+          </label>
+          @if (library().length) {
+            <button class="btn-ghost btn-sm" [class.!text-danger]="confirmClear()" (click)="clearAll()" [disabled]="indexing()">
+              {{ confirmClear() ? 'Click again to delete all' : 'Clear all' }}
+            </button>
+          }
+        </div>
+      </div>
+    </aside>
+
+    <!-- ================= ASK ================= -->
+    <section class="min-h-0 overflow-y-auto" [class.max-lg:hidden]="mobileTab() !== 'ask'">
+      <div class="sticky top-0 z-[1] bg-bg/90 px-4 pt-6 pb-4 backdrop-blur sm:px-8">
+        <div class="mx-auto flex max-w-2xl gap-2">
+          <input class="input" placeholder="Ask something about your documents…"
+                 [value]="query()" (input)="query.set($any($event.target).value)" (keydown.enter)="search()"
+                 [disabled]="paused()" />
+          <button class="btn-primary h-10" (click)="search()" [disabled]="searching() || !query().trim() || paused()">
+            {{ searching() ? 'Searching…' : 'Search' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="mx-auto max-w-2xl space-y-6 px-4 pb-16 sm:px-8">
+        @if (errors().length) {
+          <div class="flex items-start justify-between gap-4 rounded-2xl bg-danger-bg p-4 text-sm text-danger">
+            <div class="space-y-1">
+              @for (err of errors(); track $index) { <div>{{ err }}</div> }
+            </div>
+            <button class="btn-ghost btn-sm" (click)="errors.set([])">Dismiss</button>
+          </div>
+        }
+
+        @if (!library().length) {
+          <!-- First run -->
+          <div class="space-y-4 pt-10 text-center">
+            <div class="text-5xl">🦥</div>
+            <h1 class="text-3xl sm:text-4xl">Ask your documents.<br />Privately.</h1>
+            <p class="mx-auto max-w-md text-muted">
+              Drop in PDFs, Word, Excel, text or Markdown files. Everything is parsed, indexed and searched right here
+              in your browser. Nothing is uploaded.
+            </p>
+            <label class="btn-primary">
+              Add files
+              <input type="file" multiple class="sr-only" [accept]="accept" (change)="onFiles($event)" />
+            </label>
+            <p class="text-xs text-subtle">It's slow (it's a sloth), but you only pay once: your library is saved in this browser.</p>
+          </div>
+        } @else if (!searched()) {
+          <div class="pt-10 text-center text-sm text-muted">
+            Ask a question about your {{ library().length }} document{{ library().length === 1 ? '' : 's' }}.
+            Results match exact words and meaning.
+            @if (indexing()) { <div class="mt-1 text-subtle">You can search while files are still being indexed.</div> }
+          </div>
+        } @else {
+          @if (!strongGroups().length) {
+            <p class="pt-6 text-center text-sm text-muted">No strong matches. Try different words.</p>
+          } @else {
+            <p class="text-xs text-subtle">
+              <mark>word match</mark> ·
+              <span class="rounded-sm bg-semantic px-0.5 underline decoration-dotted">closest sentence</span>
+            </p>
+          }
+          <ng-container *ngTemplateOutlet="groups; context: { $implicit: strongGroups() }" />
+
+          @if (weakCount()) {
+            <button class="btn-ghost btn-sm" (click)="showWeak.update(v => !v)">
+              {{ showWeak() ? 'Hide' : 'Show' }} {{ weakCount() }} weak match{{ weakCount() === 1 ? '' : 'es' }}
+            </button>
+            @if (showWeak()) {
+              <div class="opacity-60">
+                <ng-container *ngTemplateOutlet="groups; context: { $implicit: weakGroups() }" />
+              </div>
+            }
+          }
+        }
+      </div>
+    </section>
+
+    <ng-template #groups let-groups>
+      <div class="space-y-6">
+        @for (g of groups; track g.docName) {
+          <div class="space-y-2">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="font-medium">{{ g.docName }}</span>
+              <span class="text-subtle">{{ g.hits.length }} match{{ g.hits.length === 1 ? '' : 'es' }}</span>
+            </div>
+            @for (r of g.hits; track r.id) {
+              <button class="card block w-full cursor-pointer space-y-2 text-left transition-colors hover:border-fg"
+                      [class.!border-fg]="r.id === selectedHit()?.id" (click)="openHit(r)">
+                <p class="text-sm leading-relaxed whitespace-pre-wrap">@for (s of r.segments; track $index) {<span
+                    [class.bg-semantic]="s.semantic" [class.underline]="s.semantic" [class.decoration-dotted]="s.semantic"
+                  >@if (s.keyword) {<mark>{{ s.text }}</mark>} @else {{{ s.text }}}</span>}</p>
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle">
+                  <span>Passage {{ r.index + 1 }}</span>
+                  @if (devMode()) {
+                    <span class="font-mono">rrf {{ r.score.toFixed(4) }}</span>
+                    <span class="font-mono">semantic {{ r.vectorRank ? '#' + r.vectorRank + ' (' + r.similarity!.toFixed(3) + ')' : '-' }}</span>
+                    <span class="font-mono">keyword {{ r.keywordRank ? '#' + r.keywordRank : '-' }}</span>
+                    @if (r.sentenceScore !== undefined) { <span class="font-mono">sentence {{ r.sentenceScore.toFixed(3) }}</span> }
+                  }
+                  <span class="ml-auto font-medium text-muted">Open in source →</span>
+                </div>
+              </button>
+            }
+          </div>
+        }
+      </div>
+    </ng-template>
+
+    <!-- ================= INSPECTOR ================= -->
+    <aside class="min-h-0 overflow-y-auto border-line lg:border-l" [class.max-lg:hidden]="mobileTab() !== 'source'">
+      @if (selectedItem(); as item) {
+        <div class="sticky top-0 z-[1] space-y-3 border-b border-line bg-bg/90 p-4 backdrop-blur">
+          <div class="flex items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <h2 class="truncate text-base" [title]="item.name">{{ item.name }}</h2>
+              <p class="text-xs text-subtle">
+                {{ item.ext.toUpperCase() }}{{ item.indexed ? ' · ' + item.chunks + ' passages · ' + item.chars + ' chars' : '' }}
+              </p>
+            </div>
+            <button class="btn-ghost btn-sm" (click)="closeInspector()" title="Close">✕</button>
+          </div>
+          @if (selectedTables().length || ['xlsx', 'xls', 'csv'].includes(item.ext)) {
+            <div class="flex gap-1 rounded-full bg-surface-strong p-1 text-xs">
+              <button class="flex-1 cursor-pointer rounded-full py-1 transition-colors"
+                      [class]="inspectorTab() === 'text' ? 'bg-bg font-medium shadow-sm' : 'text-muted'"
+                      (click)="inspectorTab.set('text')">Passages</button>
+              <button class="flex-1 cursor-pointer rounded-full py-1 transition-colors"
+                      [class]="inspectorTab() === 'table' ? 'bg-bg font-medium shadow-sm' : 'text-muted'"
+                      (click)="inspectorTab.set('table'); !selectedTable() && selectedTables().length && previewTable(selectedTables()[0])">Table</button>
+            </div>
+          }
+        </div>
+
+        <div class="space-y-4 p-4">
+          @if (item.details.length) {
+            <div class="rounded-xl p-3 text-xs" [class]="item.stage === 'error' ? 'bg-danger-bg text-danger' : 'bg-warn-bg'">
+              @for (d of item.details; track $index) { <div>{{ d }}</div> }
+            </div>
+          }
+
+          @if (inspectorTab() === 'text') {
+            @if (devMode() && selectedHit(); as h) {
+              <div class="rounded-xl bg-surface p-3 font-mono text-xs text-muted">
+                passage {{ h.index + 1 }} · rrf {{ h.score.toFixed(4) }} ·
+                semantic {{ h.vectorRank ? '#' + h.vectorRank + ' (' + h.similarity!.toFixed(3) + ')' : '-' }} ·
+                keyword {{ h.keywordRank ? '#' + h.keywordRank : '-' }}
+                @if (h.sentenceScore !== undefined) { · sentence {{ h.sentenceScore.toFixed(3) }} }
+              </div>
+            }
+            @if (devMode() && docChunks().length) {
+              <p class="text-xs text-subtle">Embedding strip: 384 numbers per passage, left→right. Red = positive, blue = negative.</p>
+            }
+            @for (c of docChunks(); track c.id) {
+              <div [id]="'chunk-' + c.id" class="scroll-mt-32 rounded-xl p-3 transition-colors"
+                   [class]="c.id === selectedHit()?.id ? 'bg-surface ring-1 ring-fg' : ''">
+                <div class="mb-1 text-[11px] font-medium text-subtle">Passage {{ c.index + 1 }}</div>
+                @if (c.id === selectedHit()?.id) {
+                  <p class="text-sm leading-relaxed whitespace-pre-wrap">@for (s of selectedHit()!.segments; track $index) {<span
+                      [class.bg-semantic]="s.semantic" [class.underline]="s.semantic" [class.decoration-dotted]="s.semantic"
+                    >@if (s.keyword) {<mark>{{ s.text }}</mark>} @else {{{ s.text }}}</span>}</p>
+                } @else {
+                  <p class="text-sm leading-relaxed whitespace-pre-wrap text-muted">{{ c.text }}</p>
+                }
+                @if (devMode()) {
+                  <div class="mt-2 h-3 w-full rounded-sm" [style.background]="c.gradient"></div>
+                  <div class="mt-1 font-mono text-[11px] text-subtle">{{ c.preview }}</div>
+                }
+              </div>
+            } @empty {
+              @if (!item.indexed) { <p class="text-sm text-muted">Nothing indexed for this file.</p> }
+            }
+            @if (devMode() && extracted()[item.name]; as doc) {
+              <details class="rounded-xl border border-line">
+                <summary class="cursor-pointer px-3 py-2 text-xs text-muted">
+                  Extracted text · {{ doc.text.length }} chars · parsed in {{ doc.ms }} ms
+                </summary>
+                <pre class="max-h-96 overflow-auto border-t border-line p-3 font-mono text-[11px] whitespace-pre-wrap">{{ doc.text }}</pre>
+              </details>
+            }
+          } @else {
+            @if (selectedTables().length) {
+              <div class="flex flex-wrap gap-1.5">
+                @for (t of selectedTables(); track t) {
+                  <button class="cursor-pointer rounded-full border px-3 py-1 font-mono text-xs transition-colors"
+                          [class]="t === selectedTable() ? 'border-fg bg-fg text-bg' : 'border-line hover:border-fg'"
+                          (click)="previewTable(t)">{{ t }}</button>
+                }
+              </div>
+              <textarea class="textarea font-mono text-xs" rows="3" [value]="sql()"
+                        (input)="sql.set($any($event.target).value)"
+                        (keydown.control.enter)="runSql()" (keydown.meta.enter)="runSql()"></textarea>
+              <div class="flex items-center gap-3">
+                <button class="btn-primary btn-sm" (click)="runSql()" [disabled]="sqlRunning()">Run SQL</button>
+                <span class="text-xs text-subtle">Ctrl+Enter · DuckDB, in your browser</span>
+              </div>
+              @if (sqlResult(); as r) {
+                <p class="text-xs text-subtle">
+                  {{ r.total }} rows{{ r.total > r.rows.length ? ' (showing ' + r.rows.length + ')' : '' }}
+                </p>
+                <div class="table-wrap max-h-[60vh]">
+                  <table class="data-table text-xs">
+                    <tr>@for (c of r.columns; track $index) { <th>{{ c }}</th> }</tr>
+                    @for (row of r.rows; track $index) {
+                      <tr>@for (v of row; track $index) { <td class="tabular-nums">{{ v }}</td> }</tr>
+                    }
+                  </table>
+                </div>
+              }
+            } @else {
+              <p class="text-sm text-muted">
+                Tables aren't saved between visits yet. Add this file again to query it with SQL.
+              </p>
+            }
+          }
+        </div>
+      } @else {
+        <div class="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+          <div class="text-3xl opacity-40">📄</div>
+          <p class="text-sm text-muted">Pick a result or a document to see it here.</p>
+          <p class="text-xs text-subtle">Spreadsheets open as tables you can query with SQL.</p>
         </div>
       }
-    } @else {
-      <p class="text-sm text-muted">
-        Upload a .xlsx / .xls / .csv to query it with SQL. Tables are in memory, so re-upload after a reload.
-      </p>
-    }
+    </aside>
   </div>
 
-  <!-- Raw extraction -->
-  @if (docs().length) {
-    <div>
-      <h2 class="mb-4">Extracted text</h2>
-      <div class="divide-y divide-line rounded-2xl border border-line">
-        @for (doc of docs(); track doc.name) {
-          <details class="group px-5 py-3">
-            <summary class="cursor-pointer text-sm">
-              <span class="font-medium">{{ doc.name }}</span>
-              <span class="text-subtle"> · {{ doc.type }} · {{ doc.text.length }} chars · {{ doc.ms }} ms</span>
-            </summary>
-            <pre class="mt-3 max-h-96 overflow-auto rounded-xl bg-surface p-4 font-mono text-xs whitespace-pre-wrap">{{ doc.text }}</pre>
-          </details>
-        }
+  @if (dragging()) {
+    <div class="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-3xl border-2 border-dashed
+                border-fg bg-bg/85 backdrop-blur-sm">
+      <div class="text-center">
+        <div class="text-4xl">🦥</div>
+        <p class="mt-2 text-lg font-medium">Drop to add to your library</p>
+        <p class="text-sm text-muted">Files and folders · stays on this device</p>
       </div>
     </div>
   }
-</section>
+</div>

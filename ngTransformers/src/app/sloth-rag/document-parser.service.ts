@@ -9,6 +9,9 @@ export interface ExtractedDocument {
   sheets?: { name: string; csv: string }[];
 }
 
+/** File extensions parse() understands (lowercase, no dot). */
+export const SUPPORTED_EXTENSIONS = ['pdf', 'docx', 'xlsx', 'xls', 'csv', 'txt', 'md', 'markdown'];
+
 /**
  * Phase 1 of Sloth RAG: turn a dropped file into plain text, entirely in the browser.
  * Each parser is dynamically imported so it only downloads when first needed.

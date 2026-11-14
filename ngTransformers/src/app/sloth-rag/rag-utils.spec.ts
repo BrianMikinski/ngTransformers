@@ -1,5 +1,5 @@
 import {
-  chunkText, dot, highlightSegments, queryTerms, reciprocalRankFusion, splitSentences, toFtsQuery, toTableName,
+  chunkText, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, reciprocalRankFusion, splitSentences, toFtsQuery, toTableName,
   vectorGradient,
 } from './rag-utils';
 
@@ -105,5 +105,32 @@ describe('toTableName', () => {
     expect(toTableName('Sales Q3.xlsx', 'Sheet 1')).toBe('sales_q3_sheet_1');
     expect(toTableName('people.csv')).toBe('people');
     expect(toTableName('2024 report.xlsx', 'Data')).toBe('t_2024_report_data');
+  });
+});
+
+describe('isStrongHit', () => {
+  it('keeps keyword matches and semantically close hits, drops the rest', () => {
+    expect(isStrongHit({ keywordRank: 3, similarity: 0.01 })).toBe(true);
+    expect(isStrongHit({ similarity: 0.67 })).toBe(true);
+    expect(isStrongHit({ similarity: 0.022 })).toBe(false);
+    expect(isStrongHit({ similarity: 0.25 })).toBe(false); // unrelated legal text scored this in testing
+    expect(isStrongHit({})).toBe(false);
+  });
+});
+
+describe('groupHits', () => {
+  it('groups by document, ordered by each document best hit', () => {
+    const groups = groupHits([{ docName: 'b', id: 1 }, { docName: 'a', id: 2 }, { docName: 'b', id: 3 }]);
+    expect(groups.map(g => g.docName)).toEqual(['b', 'a']);
+    expect(groups[0].hits.map(h => h.id)).toEqual([1, 3]);
+  });
+});
+
+describe('fileExtension', () => {
+  it('returns the lowercase extension', () => {
+    expect(fileExtension('Q3 Report.XLSX')).toBe('xlsx');
+    expect(fileExtension('notes.v2.md')).toBe('md');
+    expect(fileExtension('README')).toBe('');
+    expect(fileExtension('.gitignore')).toBe('');
   });
 });

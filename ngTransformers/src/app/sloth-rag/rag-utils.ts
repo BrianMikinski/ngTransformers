@@ -141,3 +141,37 @@ export function toTableName(fileName: string, sheetName?: string): string {
     .replace(/^_+|_+$/g, '');
   return /^[a-z_]/.test(name) ? name : `t_${name}`;
 }
+
+/**
+ * Where the SQLite index lives:
+ * - opening: worker starting
+ * - persistent: OPFS, survives reloads
+ * - memory: OPFS unsupported, lost on reload
+ * - waiting: another tab owns the database; waiting for it
+ * - moved: this tab handed the database to another tab
+ */
+export type StorageState = 'opening' | 'persistent' | 'memory' | 'waiting' | 'moved';
+
+/** Below this cosine similarity, a hit with no keyword match is treated as noise. */
+export const MIN_RESULT_SIMILARITY = 0.3;
+
+/** A hit is worth showing if it matched a query word, or is semantically close enough. */
+export function isStrongHit(hit: Pick<SearchHit, 'keywordRank' | 'similarity'>): boolean {
+  return hit.keywordRank !== undefined || (hit.similarity ?? 0) >= MIN_RESULT_SIMILARITY;
+}
+
+/** Groups hits by document, keeping rank order (documents ordered by their best hit). */
+export function groupHits<T extends { docName: string }>(hits: T[]): { docName: string; hits: T[] }[] {
+  const groups = new Map<string, T[]>();
+  for (const h of hits) {
+    const list = groups.get(h.docName);
+    list ? list.push(h) : groups.set(h.docName, [h]);
+  }
+  return [...groups].map(([docName, hits]) => ({ docName, hits }));
+}
+
+/** Lowercase extension without the dot ('' if none). */
+export function fileExtension(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+}

@@ -1,17 +1,33 @@
-import { Injectable } from '@angular/core';
-import { ChunkInput, ChunkRow, DocumentSummary, SearchHit } from './rag-utils';
+import { Injectable, signal } from '@angular/core';
+import { ChunkInput, ChunkRow, DocumentSummary, SearchHit, StorageState } from './rag-utils';
 
-/** Thin promise-based RPC wrapper around the SQLite worker (see sqlite.worker.ts). */
+const CHANNEL = 'sloth-rag-db';
+
+/**
+ * Thin promise-based RPC wrapper around the SQLite worker (see sqlite.worker.ts).
+ * Also coordinates tabs: only one tab can own the OPFS database. "Use here" broadcasts a
+ * release request; the owning tab terminates its worker, which frees the lock for us.
+ */
 @Injectable({ providedIn: 'root' })
 export class SqliteStoreService {
+  readonly state = signal<StorageState>('opening');
+
   #worker?: Worker;
   #pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   #nextId = 0;
+  #channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel(CHANNEL);
 
-  storage(): Promise<string> { return this.#call('storage'); }
+  constructor() {
+    this.#channel?.addEventListener('message', ({ data }) => {
+      if (data === 'release' && this.#worker) this.#release();
+    });
+  }
+
+  storage(): Promise<StorageState> { return this.#call('storage'); }
   count(): Promise<number> { return this.#call('count'); }
   documents(): Promise<DocumentSummary[]> { return this.#call('documents'); }
-  chunks(docName: string, limit = 200): Promise<ChunkRow[]> { return this.#call('chunks', docName, limit); }
+  chunks(docName: string, limit = 500): Promise<ChunkRow[]> { return this.#call('chunks', docName, limit); }
+  deleteDocument(docName: string): Promise<void> { return this.#call('deleteDocument', docName); }
   clear(): Promise<void> { return this.#call('clear'); }
   replaceDocument(docName: string, chunks: ChunkInput[]): Promise<void> {
     return this.#call('replaceDocument', docName, chunks);
@@ -20,7 +36,24 @@ export class SqliteStoreService {
     return this.#call('search', query, queryVector, k);
   }
 
+  /** Ask other tabs to let go of the database and (re)open it here. */
+  takeOver(): Promise<StorageState> {
+    this.#channel?.postMessage('release');
+    return this.storage();
+  }
+
+  /** Another tab wants the database: stop our worker (frees the OPFS handles and the Web Lock). */
+  #release() {
+    this.#worker!.terminate();
+    this.#worker = undefined;
+    this.#failAll('The database moved to another tab');
+    this.state.set('moved');
+  }
+
   #call<T>(method: string, ...args: unknown[]): Promise<T> {
+    if (this.state() === 'moved' && method !== 'storage') {
+      return Promise.reject(new Error('The database is open in another tab. Click "Use here" first.'));
+    }
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
@@ -30,8 +63,14 @@ export class SqliteStoreService {
 
   #getWorker(): Worker {
     if (this.#worker) return this.#worker;
+    this.state.set('opening');
     const worker = new Worker(new URL('./sqlite.worker', import.meta.url), { type: 'module' });
-    worker.onmessage = ({ data: { id, result, error } }) => {
+    worker.onmessage = ({ data }) => {
+      if (data.event === 'state') {
+        this.state.set(data.state);
+        return;
+      }
+      const { id, result, error } = data;
       const p = this.#pending.get(id);
       this.#pending.delete(id);
       error ? p?.reject(new Error(error)) : p?.resolve(result);

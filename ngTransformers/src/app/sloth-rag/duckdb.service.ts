@@ -23,6 +23,12 @@ export class DuckDbService {
     await conn.query(`CREATE OR REPLACE TABLE "${table}" AS SELECT * FROM read_csv_auto('${file}')`);
   }
 
+  async dropTables(tables: string[]): Promise<void> {
+    if (!tables.length || !this.#conn) return;
+    const { conn } = await this.#open();
+    for (const t of tables) await conn.query(`DROP TABLE IF EXISTS "${t}"`);
+  }
+
   async tables(): Promise<TableInfo[]> {
     const r = await this.query(`
       SELECT table_name, string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position)
