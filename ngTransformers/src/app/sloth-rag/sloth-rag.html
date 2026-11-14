@@ -1,0 +1,134 @@
+<h1>🦥 Sloth RAG</h1>
+<p>Slow, in-browser document parsing and search. Nothing leaves your machine.</p>
+
+<p>
+  Index: {{ chunkCount() }} chunks · {{ storage() }}
+  <button (click)="clearIndex()" [disabled]="busy()">Clear index</button>
+</p>
+
+<input type="file" multiple accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md,.markdown"
+       (change)="onFiles($event)" [disabled]="busy()" />
+
+@if (status()) { <p>⏳ {{ status() }}</p> }
+
+@if (errors().length) {
+  <div style="color: #b00020; border: 1px solid #b00020; padding: 0.5em; margin: 0.5em 0">
+    @for (err of errors(); track $index) { <div>❌ {{ err }}</div> }
+    <button (click)="errors.set([])">Dismiss</button>
+  </div>
+}
+
+<!-- Import log -->
+@if (importLog().length) {
+  <h2>Import log</h2>
+  <table border="1" cellpadding="4" style="border-collapse: collapse">
+    <tr><th></th><th>File</th><th>Type</th><th>Result</th><th>Time</th></tr>
+    @for (entry of importLog(); track $index) {
+      <tr [style.background]="entry.status === 'error' ? '#fde7ea' : entry.status === 'warn' ? '#fff6dc' : ''">
+        <td>{{ entry.status === 'ok' ? '✅' : entry.status === 'warn' ? '⚠️' : '❌' }}</td>
+        <td>{{ entry.file }}</td>
+        <td>{{ entry.type ?? '-' }}</td>
+        <td>@for (line of entry.details; track $index) { <div>{{ line }}</div> }</td>
+        <td>{{ entry.ms }} ms</td>
+      </tr>
+    }
+  </table>
+  <button (click)="importLog.set([])">Clear log</button>
+}
+
+<!-- Search -->
+<h2>Search <small>(keyword + semantic)</small></h2>
+<input #q size="50" placeholder="Ask something about your documents..."
+       (keydown.enter)="search(q.value)" [disabled]="busy()" />
+<button (click)="search(q.value)" [disabled]="busy()">Search</button>
+
+@if (results().length) {
+  <p>
+    <small>
+      <mark>keyword match</mark> = exact word from your query ·
+      <span style="background: #d6ecff; text-decoration: underline dotted">best sentence</span>
+      = sentence closest in meaning to your query (only when similarity ≥ 0.25)
+    </small>
+  </p>
+}
+@for (r of results(); track r.id) {
+  <div style="margin: 1em 0">
+    <strong>{{ r.score.toFixed(4) }}</strong> · {{ r.docName }} · chunk {{ r.index }}
+    <small>
+      · semantic {{ r.vectorRank ? '#' + r.vectorRank + ' (' + r.similarity!.toFixed(3) + ')' : '-' }}
+      · keyword {{ r.keywordRank ? '#' + r.keywordRank : '-' }}
+      @if (r.sentenceScore !== undefined) { · best sentence {{ r.sentenceScore.toFixed(3) }} }
+    </small>
+    <div style="white-space: pre-wrap; font-family: monospace; margin: 0.25em 0">@for (s of r.segments; track $index) {<span
+        [style.background]="s.semantic ? '#d6ecff' : ''"
+        [style.text-decoration]="s.semantic ? 'underline dotted' : ''">@if (s.keyword) {<mark>{{ s.text }}</mark>} @else {{{ s.text }}}</span>}</div>
+  </div>
+}
+
+<!-- Index browser -->
+<h2>Index browser <small>(SQLite)</small></h2>
+@if (documents().length) {
+  <table border="1" cellpadding="4" style="border-collapse: collapse">
+    <tr><th>Document</th><th>Chunks</th><th>Chars</th><th></th></tr>
+    @for (d of documents(); track d.docName) {
+      <tr [style.font-weight]="d.docName === selectedDoc() ? 'bold' : ''">
+        <td>{{ d.docName }}</td><td>{{ d.chunks }}</td><td>{{ d.chars }}</td>
+        <td><button (click)="viewDocument(d.docName)">{{ d.docName === selectedDoc() ? 'Hide' : 'View chunks' }}</button></td>
+      </tr>
+    }
+  </table>
+
+  @if (selectedDoc()) {
+    <h3>{{ selectedDoc() }} <small>({{ docChunks().length }} chunks shown)</small></h3>
+    <p><small>Embedding: 384 numbers per chunk, drawn left→right. Red = positive, blue = negative.</small></p>
+    <div style="overflow: auto; max-height: 500px">
+      <table border="1" cellpadding="4" style="border-collapse: collapse">
+        <tr><th>#</th><th>Text</th><th>Embedding</th><th>First values</th></tr>
+        @for (c of docChunks(); track c.id) {
+          <tr>
+            <td>{{ c.index }}</td>
+            <td style="max-width: 420px" [title]="c.text">{{ c.text.length > 160 ? c.text.slice(0, 160) + '…' : c.text }}</td>
+            <td><div style="width: 384px; height: 18px" [style.background]="c.gradient"></div></td>
+            <td><code>{{ c.preview }}</code></td>
+          </tr>
+        }
+      </table>
+    </div>
+  }
+} @else {
+  <p>Nothing indexed yet.</p>
+}
+
+<!-- DuckDB -->
+<h2>Spreadsheet SQL <small>(DuckDB)</small></h2>
+@if (tables().length) {
+  <ul>
+    @for (t of tables(); track t.table) { <li><code>{{ t.table }}</code>: {{ t.columns }}</li> }
+  </ul>
+  <textarea #sql rows="4" cols="80" [value]="'SELECT * FROM ' + tables()[0].table + ' LIMIT 10'"></textarea>
+  <br />
+  <button (click)="runSql(sql.value)" [disabled]="busy()">Run SQL</button>
+
+  @if (sqlResult(); as r) {
+    <p><small>{{ r.total }} rows{{ r.total > r.rows.length ? ' (showing ' + r.rows.length + ')' : '' }}</small></p>
+    <div style="overflow: auto; max-height: 400px">
+      <table border="1" cellpadding="4" style="border-collapse: collapse">
+        <tr>@for (c of r.columns; track $index) { <th>{{ c }}</th> }</tr>
+        @for (row of r.rows; track $index) {
+          <tr>@for (v of row; track $index) { <td>{{ v }}</td> }</tr>
+        }
+      </table>
+    </div>
+  }
+} @else {
+  <p>Upload a .xlsx / .xls / .csv to query it with SQL. (Tables are in-memory: re-upload after a reload.)</p>
+}
+
+<!-- Raw extraction -->
+@if (docs().length) { <h2>Extracted text</h2> }
+@for (doc of docs(); track doc.name) {
+  <details>
+    <summary>{{ doc.name }} ({{ doc.type }}, {{ doc.text.length }} chars, {{ doc.ms }} ms)</summary>
+    <pre style="white-space: pre-wrap; max-height: 400px; overflow: auto">{{ doc.text }}</pre>
+  </details>
+}

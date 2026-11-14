@@ -1,4 +1,7 @@
-import { chunkText, dot, reciprocalRankFusion, toFtsQuery, toTableName } from './rag-utils';
+import {
+  chunkText, dot, highlightSegments, queryTerms, reciprocalRankFusion, splitSentences, toFtsQuery, toTableName,
+  vectorGradient,
+} from './rag-utils';
 
 describe('chunkText', () => {
   it('returns nothing for empty or whitespace text', () => {
@@ -43,14 +46,57 @@ describe('reciprocalRankFusion', () => {
   });
 });
 
-describe('toFtsQuery', () => {
-  it('quotes and ORs unique words, dropping FTS5 syntax characters', () => {
-    expect(toFtsQuery('What is "Q3" revenue? revenue* AND -NEAR(')).toBe(
-      '"what" OR "is" OR "q3" OR "revenue" OR "and" OR "near"');
+describe('queryTerms / toFtsQuery', () => {
+  it('quotes and ORs unique words, dropping stop words and FTS5 syntax characters', () => {
+    expect(toFtsQuery('What is "Q3" revenue? revenue* AND -NEAR(')).toBe('"q3" OR "revenue" OR "near"');
+  });
+
+  it('keeps stop words if the query is only stop words', () => {
+    expect(queryTerms('who is it')).toEqual(['who', 'is', 'it']);
   });
 
   it('returns empty string when there are no words', () => {
     expect(toFtsQuery('?? !!')).toBe('');
+  });
+});
+
+describe('splitSentences', () => {
+  it('returns trimmed sentence spans', () => {
+    const text = 'First one. Second!  Third?';
+    expect(splitSentences(text).map(s => text.slice(s.start, s.end))).toEqual(['First one.', 'Second!', 'Third?']);
+  });
+
+  it('treats unpunctuated text as one sentence', () => {
+    expect(splitSentences('a,b,c')).toEqual([{ start: 0, end: 5 }]);
+  });
+});
+
+describe('highlightSegments', () => {
+  const flags = (segs: ReturnType<typeof highlightSegments>) =>
+    segs.map(s => `${s.keyword ? 'K' : ''}${s.semantic ? 'S' : ''}[${s.text}]`).join('');
+
+  it('marks whole-word, case-insensitive keyword matches', () => {
+    expect(flags(highlightSegments('Revenue rose; revenues fell', ['revenue'])))
+      .toBe('K[Revenue][ rose; revenues fell]');
+  });
+
+  it('overlays a semantic sentence span with keyword matches', () => {
+    const text = 'Sloths sleep. Q3 revenue grew.';
+    expect(flags(highlightSegments(text, ['revenue'], { start: 14, end: 30 })))
+      .toBe('[Sloths sleep. ]S[Q3 ]KS[revenue]S[ grew.]');
+  });
+
+  it('returns the whole text unflagged when nothing matches', () => {
+    expect(highlightSegments('nothing here', ['zebra'])).toEqual([{ text: 'nothing here', keyword: false, semantic: false }]);
+  });
+});
+
+describe('vectorGradient', () => {
+  it('maps positive to red, negative to blue, zero to white', () => {
+    const g = vectorGradient(Float32Array.from([0.15, -0.15, 0]));
+    expect(g).toContain('rgb(255,0,0) 0.000% 33.333%');
+    expect(g).toContain('rgb(0,0,255) 33.333% 66.667%');
+    expect(g).toContain('rgb(255,255,255) 66.667% 100.000%');
   });
 });
 

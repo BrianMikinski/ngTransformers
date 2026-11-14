@@ -4,6 +4,9 @@ export interface ChunkInput {
   vector: Float32Array;
 }
 
+export interface DocumentSummary { docName: string; chunks: number; chars: number; }
+export interface ChunkRow { id: number; index: number; text: string; vector: Float32Array; }
+
 export interface SearchHit {
   id: number;
   docName: string;
@@ -56,10 +59,77 @@ export function reciprocalRankFusion(rankings: number[][], k = 60): { id: number
   return [...scores].map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
 }
 
+const STOP_WORDS = new Set((
+  'a an and are as at be but by can do does for from had has have how i if in into is it its me my no not of on ' +
+  'or our so that the their them then there these they this those to was we were what when where which who why ' +
+  'will with you your'
+).split(' '));
+
+/** Unique lowercase words from a query, minus stop words (unless that would leave nothing). */
+export function queryTerms(query: string): string[] {
+  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])];
+  const meaningful = terms.filter(t => !STOP_WORDS.has(t));
+  return meaningful.length ? meaningful : terms;
+}
+
 /** Turns free text into a safe FTS5 query: each word quoted, OR'ed together. */
 export function toFtsQuery(query: string): string {
-  const terms = query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  return [...new Set(terms)].map(t => `"${t}"`).join(' OR ');
+  return queryTerms(query).map(t => `"${t}"`).join(' OR ');
+}
+
+export interface Span { start: number; end: number; }
+
+/** Rough sentence spans (end-exclusive), splitting after . ! ? or newlines. */
+export function splitSentences(text: string): Span[] {
+  const spans: Span[] = [];
+  for (const m of text.matchAll(/[^.!?\n]+(?:[.!?]+|\n|$)/g)) {
+    const start = m.index! + (m[0].length - m[0].trimStart().length);
+    const end = m.index! + m[0].trimEnd().length;
+    if (end > start) spans.push({ start, end });
+  }
+  return spans;
+}
+
+export interface Segment { text: string; keyword: boolean; semantic: boolean; }
+
+/**
+ * Splits text into display segments flagged as keyword matches (whole-word, case-insensitive)
+ * and/or inside the semantically best-matching sentence.
+ */
+export function highlightSegments(text: string, terms: string[], semantic?: Span): Segment[] {
+  const keywordSpans: Span[] = [];
+  if (terms.length) {
+    const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])(?:${escaped.join('|')})(?![\\p{L}\\p{N}])`, 'giu');
+    for (const m of text.matchAll(re)) keywordSpans.push({ start: m.index!, end: m.index! + m[0].length });
+  }
+
+  const cuts = new Set([0, text.length]);
+  for (const s of [...keywordSpans, ...(semantic ? [semantic] : [])]) { cuts.add(s.start); cuts.add(s.end); }
+  const points = [...cuts].sort((a, b) => a - b);
+
+  const segments: Segment[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const [start, end] = [points[i], points[i + 1]];
+    const keyword = keywordSpans.some(s => s.start <= start && end <= s.end);
+    const inSemantic = !!semantic && semantic.start <= start && end <= semantic.end;
+    const last = segments.at(-1);
+    if (last && last.keyword === keyword && last.semantic === inSemantic) last.text += text.slice(start, end);
+    else segments.push({ text: text.slice(start, end), keyword, semantic: inSemantic });
+  }
+  return segments;
+}
+
+/** A CSS gradient "heat strip" of an embedding: red = positive, blue = negative. */
+export function vectorGradient(v: Float32Array, scale = 0.15): string {
+  const w = 100 / v.length;
+  const stops = Array.from(v, (x, i) => {
+    const t = Math.max(-1, Math.min(1, x / scale));
+    const fade = Math.round(255 * (1 - Math.abs(t)));
+    const color = t >= 0 ? `rgb(255,${fade},${fade})` : `rgb(${fade},${fade},255)`;
+    return `${color} ${(i * w).toFixed(3)}% ${((i + 1) * w).toFixed(3)}%`;
+  });
+  return `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
 /** A safe, readable SQL identifier for a spreadsheet sheet, e.g. "Sales Q3.xlsx" + "Sheet1" -> sales_q3_sheet1. */

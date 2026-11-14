@@ -5,7 +5,7 @@
  * Hybrid search = FTS5 keyword ranking + brute-force cosine ranking, fused with RRF.
  */
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { ChunkInput, SearchHit, dot, reciprocalRankFusion, toFtsQuery } from './rag-utils';
+import { ChunkInput, ChunkRow, DocumentSummary, SearchHit, dot, reciprocalRankFusion, toFtsQuery } from './rag-utils';
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS chunks (
@@ -61,6 +61,18 @@ const api = {
     return db.selectValue('SELECT count(*) FROM chunks');
   },
 
+  async documents(): Promise<DocumentSummary[]> {
+    const { db } = await open();
+    return db.selectObjects(
+      'SELECT doc_name AS docName, count(*) AS chunks, sum(length(text)) AS chars FROM chunks GROUP BY doc_name ORDER BY doc_name');
+  },
+
+  async chunks(docName: string, limit = 200): Promise<ChunkRow[]> {
+    const { db } = await open();
+    return db.selectObjects('SELECT id, idx, text, vector FROM chunks WHERE doc_name = ? ORDER BY idx LIMIT ?', [docName, limit])
+      .map((r: any) => ({ id: r.id, index: r.idx, text: r.text, vector: toFloat32(r.vector) }));
+  },
+
   async clear(): Promise<void> {
     const { db } = await open();
     db.exec('DELETE FROM chunks');
@@ -89,10 +101,8 @@ const api = {
     const { db } = await open();
 
     // 1) Vector ranking: brute-force cosine over all chunks (vectors cached in memory).
-    vectorCache ??= db.selectArrays('SELECT id, vector FROM chunks').map(([id, blob]: [number, Uint8Array]) => ({
-      id,
-      vector: new Float32Array(blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength)),
-    }));
+    vectorCache ??= db.selectArrays('SELECT id, vector FROM chunks')
+      .map(([id, blob]: [number, Uint8Array]) => ({ id, vector: toFloat32(blob) }));
     const byVector = vectorCache!
       .map(c => ({ id: c.id, similarity: dot(queryVector, c.vector) }))
       .sort((a, b) => b.similarity - a.similarity)
@@ -127,6 +137,10 @@ const api = {
     });
   },
 };
+
+function toFloat32(blob: Uint8Array): Float32Array {
+  return new Float32Array(blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength));
+}
 
 addEventListener('message', async ({ data: { id, method, args } }) => {
   try {

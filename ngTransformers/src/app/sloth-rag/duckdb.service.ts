@@ -45,9 +45,17 @@ export class DuckDbService {
     return this.#conn ??= (async () => {
       const duckdb = await import('@duckdb/duckdb-wasm');
       const worker = new Worker(new URL('duckdb/duckdb-browser-eh.worker.js', document.baseURI));
+      // If the worker script can't load, DuckDB would wait forever; surface it as an error instead.
+      const workerFailed = new Promise<never>((_, reject) => worker.addEventListener('error', e => {
+        e.preventDefault();
+        reject(new Error(`DuckDB worker failed: ${e.message || 'could not load duckdb/duckdb-browser-eh.worker.js'}`));
+      }));
       const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
-      await db.instantiate(new URL('duckdb/duckdb-eh.wasm', document.baseURI).href);
+      await Promise.race([db.instantiate(new URL('duckdb/duckdb-eh.wasm', document.baseURI).href), workerFailed]);
       return { db, conn: await db.connect() };
-    })();
+    })().catch(e => {
+      this.#conn = undefined; // allow a retry on the next call
+      throw e;
+    });
   }
 }
