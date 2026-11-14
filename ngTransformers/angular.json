@@ -30,6 +30,16 @@
                 "glob": "pdf.worker.min.mjs",
                 "input": "node_modules/pdfjs-dist/build",
                 "output": "/"
+              },
+              {
+                "glob": "sqlite3.wasm",
+                "input": "node_modules/@sqlite.org/sqlite-wasm/dist",
+                "output": "/"
+              },
+              {
+                "glob": "{duckdb-eh.wasm,duckdb-browser-eh.worker.js}",
+                "input": "node_modules/@duckdb/duckdb-wasm/dist",
+                "output": "/duckdb"
               }
             ],
             "styles": [
@@ -42,8 +52,11 @@
               "base64-js",
               "dingbat-to-unicode",
               "xmlbuilder",
-              "@xmldom/xmldom"
-            ]
+              "@xmldom/xmldom",
+              "@duckdb/duckdb-wasm",
+              "apache-arrow"
+            ],
+            "webWorkerTsConfig": "tsconfig.worker.json"
           },
           "configurations": {
             "production": {

@@ -5,6 +5,8 @@ export interface ExtractedDocument {
   type: 'pdf' | 'word' | 'excel' | 'text' | 'markdown';
   text: string;
   ms: number;
+  /** Spreadsheets only: one CSV per sheet, for loading into DuckDB. */
+  sheets?: { name: string; csv: string }[];
 }
 
 /**
@@ -21,6 +23,7 @@ export class DocumentParserService {
 
     let type: ExtractedDocument['type'];
     let text: string;
+    let sheets: ExtractedDocument['sheets'];
 
     if (ext === 'pdf') {
       type = 'pdf';
@@ -30,7 +33,8 @@ export class DocumentParserService {
       text = await this.parseDocx(data);
     } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
       type = 'excel';
-      text = await this.parseSpreadsheet(data);
+      sheets = await this.parseSpreadsheet(data);
+      text = sheets.map(s => `--- Sheet: ${s.name} ---\n${s.csv}`).join('\n\n');
     } else if (ext === 'txt') {
       type = 'text';
       text = new TextDecoder().decode(data);
@@ -42,7 +46,7 @@ export class DocumentParserService {
       throw new Error(`Unsupported file type: .${ext}`);
     }
 
-    return { name: file.name, type, text, ms: Math.round(performance.now() - start) };
+    return { name: file.name, type, text, sheets, ms:Math.round(performance.now() - start) };
   }
 
   private async parsePdf(data: ArrayBuffer): Promise<string> {
@@ -66,11 +70,9 @@ export class DocumentParserService {
     return result.value;
   }
 
-  private async parseSpreadsheet(data: ArrayBuffer): Promise<string> {
+  private async parseSpreadsheet(data: ArrayBuffer): Promise<{ name: string; csv: string }[]> {
     const XLSX = await import('xlsx');
     const workbook = XLSX.read(data, { type: 'array' });
-    return workbook.SheetNames
-      .map(name => `--- Sheet: ${name} ---\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`)
-      .join('\n\n');
+    return workbook.SheetNames.map(name => ({ name, csv: XLSX.utils.sheet_to_csv(workbook.Sheets[name]) }));
   }
 }

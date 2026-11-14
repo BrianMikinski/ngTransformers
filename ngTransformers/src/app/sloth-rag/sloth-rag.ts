@@ -1,8 +1,9 @@
 import { Component, inject, signal, ChangeDetectionStrategy } from '@angular/core';
 import { DocumentParserService, ExtractedDocument } from './document-parser.service';
 import { EmbeddingService } from './embedding.service';
-import { VectorStoreService } from './vector-store.service';
-import { chunkText, SearchResult, topK } from './rag-utils';
+import { SqliteStoreService } from './sqlite-store.service';
+import { DuckDbService, SqlResult, TableInfo } from './duckdb.service';
+import { chunkText, SearchHit, toTableName } from './rag-utils';
 
 const EMBED_BATCH = 16;
 
@@ -14,7 +15,7 @@ const EMBED_BATCH = 16;
     <p>Slow, in-browser document parsing and search. Nothing leaves your machine.</p>
 
     <p>
-      Index: {{ chunkCount() }} chunks saved in IndexedDB
+      Index: {{ chunkCount() }} chunks · {{ storage() }}
       <button (click)="clearIndex()" [disabled]="busy()">Clear index</button>
     </p>
 
@@ -27,16 +28,44 @@ const EMBED_BATCH = 16;
       <p style="color: red">{{ err }}</p>
     }
 
-    <h2>Search</h2>
+    <h2>Search <small>(keyword + semantic)</small></h2>
     <input #q size="50" placeholder="Ask something about your documents..."
            (keydown.enter)="search(q.value)" [disabled]="busy()" />
     <button (click)="search(q.value)" [disabled]="busy()">Search</button>
 
     @for (r of results(); track r.id) {
       <div style="margin: 1em 0">
-        <strong>{{ r.score.toFixed(3) }}</strong> · {{ r.docName }} · chunk {{ r.index }}
+        <strong>{{ r.score.toFixed(4) }}</strong> · {{ r.docName }} · chunk {{ r.index }}
+        <small>
+          · semantic {{ r.vectorRank ? '#' + r.vectorRank + ' (' + r.similarity!.toFixed(3) + ')' : '-' }}
+          · keyword {{ r.keywordRank ? '#' + r.keywordRank : '-' }}
+        </small>
         <pre style="white-space: pre-wrap; margin: 0.25em 0">{{ r.text }}</pre>
       </div>
+    }
+
+    <h2>Spreadsheet SQL <small>(DuckDB)</small></h2>
+    @if (tables().length) {
+      <ul>
+        @for (t of tables(); track t.table) { <li><code>{{ t.table }}</code>: {{ t.columns }}</li> }
+      </ul>
+      <textarea #sql rows="4" cols="80" [value]="'SELECT * FROM ' + tables()[0].table + ' LIMIT 10'"></textarea>
+      <br />
+      <button (click)="runSql(sql.value)" [disabled]="busy()">Run SQL</button>
+
+      @if (sqlResult(); as r) {
+        <p><small>{{ r.total }} rows{{ r.total > r.rows.length ? ' (showing ' + r.rows.length + ')' : '' }}</small></p>
+        <div style="overflow: auto; max-height: 400px">
+          <table border="1" cellpadding="4" style="border-collapse: collapse">
+            <tr>@for (c of r.columns; track $index) { <th>{{ c }}</th> }</tr>
+            @for (row of r.rows; track $index) {
+              <tr>@for (v of row; track $index) { <td>{{ v }}</td> }</tr>
+            }
+          </table>
+        </div>
+      }
+    } @else {
+      <p>Upload a .xlsx / .xls / .csv to query it with SQL. (Tables are in-memory: re-upload after a reload.)</p>
     }
 
     @if (docs().length) { <h2>Extracted text</h2> }
@@ -51,16 +80,21 @@ const EMBED_BATCH = 16;
 export class SlothRag {
   #parser = inject(DocumentParserService);
   #embedder = inject(EmbeddingService);
-  #store = inject(VectorStoreService);
+  #store = inject(SqliteStoreService);
+  #duck = inject(DuckDbService);
 
   docs = signal<ExtractedDocument[]>([]);
   errors = signal<string[]>([]);
-  results = signal<SearchResult[]>([]);
+  results = signal<SearchHit[]>([]);
+  tables = signal<TableInfo[]>([]);
+  sqlResult = signal<SqlResult | undefined>(undefined);
   chunkCount = signal(0);
+  storage = signal('opening SQLite...');
   status = signal('');
   busy = signal(false);
 
   constructor() {
+    this.#store.storage().then(s => this.storage.set(s), e => this.#error('SQLite', e));
     this.#refreshCount();
   }
 
@@ -72,9 +106,10 @@ export class SlothRag {
         this.status.set(`Parsing ${file.name}...`);
         const doc = await this.#parser.parse(file);
         this.docs.update(d => [...d.filter(x => x.name !== doc.name), doc]);
+        if (doc.sheets) await this.#loadSheets(doc);
         await this.#index(doc);
-      } catch (e: any) {
-        this.errors.update(errs => [...errs, `${file.name}: ${e?.message ?? e}`]);
+      } catch (e) {
+        this.#error(file.name, e);
       }
     }
     this.status.set('');
@@ -84,16 +119,14 @@ export class SlothRag {
 
   async search(query: string) {
     if (!query.trim()) return;
-    this.busy.set(true);
-    this.status.set('Searching... (first search may download the embedding model)');
-    try {
+    await this.#run('Searching... (first search may download the embedding model)', async () => {
       const [vector] = await this.#embedder.embed([query]);
-      this.results.set(topK(vector, await this.#store.all(), 5));
-    } catch (e: any) {
-      this.errors.update(errs => [...errs, `Search failed: ${e?.message ?? e}`]);
-    }
-    this.status.set('');
-    this.busy.set(false);
+      this.results.set(await this.#store.search(query, vector, 5));
+    });
+  }
+
+  async runSql(sql: string) {
+    await this.#run('Running SQL...', async () => this.sqlResult.set(await this.#duck.query(sql)));
   }
 
   async clearIndex() {
@@ -109,12 +142,41 @@ export class SlothRag {
       this.status.set(`Embedding ${doc.name}: ${i}/${chunks.length} chunks (first run downloads the model)...`);
       vectors.push(...await this.#embedder.embed(chunks.slice(i, i + EMBED_BATCH)));
     }
-    await this.#store.replaceDocument(doc.name, chunks.map((text, index) => ({
-      id: `${doc.name}#${index}`, docName: doc.name, index, text, vector: vectors[index]
-    })));
+    this.status.set(`Saving ${doc.name} to SQLite...`);
+    await this.#store.replaceDocument(doc.name, chunks.map((text, index) => ({ index, text, vector: vectors[index] })));
+  }
+
+  async #loadSheets(doc: ExtractedDocument) {
+    this.status.set(`Loading ${doc.name} into DuckDB (first time downloads ~34MB)...`);
+    const isCsv = doc.name.toLowerCase().endsWith('.csv');
+    for (const sheet of doc.sheets!) {
+      if (!sheet.csv.trim()) continue; // DuckDB can't infer a schema from an empty sheet
+      await this.#duck.loadCsv(toTableName(doc.name, isCsv ? undefined : sheet.name), sheet.csv);
+    }
+    this.tables.set(await this.#duck.tables());
+  }
+
+  async #run(status: string, fn: () => Promise<void>) {
+    this.busy.set(true);
+    this.status.set(status);
+    try {
+      await fn();
+    } catch (e) {
+      this.#error(status.replace(/\.\.\..*/, ''), e);
+    }
+    this.status.set('');
+    this.busy.set(false);
   }
 
   async #refreshCount() {
-    this.chunkCount.set(await this.#store.count());
+    try {
+      this.chunkCount.set(await this.#store.count());
+    } catch (e) {
+      this.#error('SQLite', e);
+    }
+  }
+
+  #error(context: string, e: unknown) {
+    this.errors.update(errs => [...errs, `${context}: ${(e as Error)?.message ?? e}`]);
   }
 }
