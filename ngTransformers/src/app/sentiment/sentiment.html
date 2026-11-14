@@ -1,13 +1,20 @@
-<div>
-  <h1>Transformers.js Sentiment Analysis!</h1>
-  <textarea [(ngModel)]="inputText" rows="3" cols="50" placeholder="Type something..."></textarea>
-  <button (click)="analyze()">
-    Run Sentiment Analysis
-  </button>
+<section class="space-y-8">
+  <div class="space-y-3">
+    <h1>Sentiment analysis</h1>
+    <p class="max-w-2xl text-lg text-muted">
+      Classify text as positive or negative with a DistilBERT model running in your browser via Transformers.js.
+    </p>
+  </div>
 
-  @if(result()) {
-  <p>
-    Input: {{ result() | json }}
-  </p>
+  <div class="card space-y-4">
+    <textarea class="textarea" [(ngModel)]="inputText" rows="4" placeholder="Type something..."></textarea>
+    <button class="btn-primary" (click)="analyze()">Run sentiment analysis</button>
+  </div>
+
+  @if (result()) {
+    <div class="card">
+      <p class="mb-2 text-sm text-muted">Result</p>
+      <pre class="overflow-auto font-mono text-sm">{{ result() | json }}</pre>
+    </div>
   }
-</div>
+</section>

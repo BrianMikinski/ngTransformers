@@ -19,6 +19,6 @@ describe('App', () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const links = Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('nav a'));
-    expect(links.map(a => a.textContent?.trim())).toEqual(['Sentiment', 'Sloth RAG']);
+    expect(links.map(a => a.textContent?.trim())).toEqual(['ngTransformers', 'Sentiment', 'Sloth RAG']);
   });
 });

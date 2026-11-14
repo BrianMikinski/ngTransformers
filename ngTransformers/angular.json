@@ -43,7 +43,7 @@
               }
             ],
             "styles": [
-              "src/styles.scss"
+              "src/styles.css"
             ],
             "allowedCommonJsDependencies": [
               "mammoth",
