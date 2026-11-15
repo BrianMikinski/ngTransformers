@@ -189,6 +189,9 @@
             @if (indexing()) { <div class="mt-1 text-subtle">You can search while files are still being indexed.</div> }
           </div>
         } @else {
+          @if (strongGroups().length) {
+            <ng-container *ngTemplateOutlet="answerCard" />
+          }
           @if (!strongGroups().length) {
             <p class="pt-6 text-center text-sm text-muted">No strong matches. Try different words.</p>
           } @else {
@@ -212,6 +215,114 @@
         }
       </div>
     </section>
+
+    <!-- Written answer (RAG) with [n] citations -->
+    <ng-template #answerCard>
+      <div class="card space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-medium">✨ Answer</span>
+          @if (llm.status() !== 'off') {
+            <span class="text-xs text-subtle">written by a small AI model on this device</span>
+          }
+          <span class="ml-auto flex gap-1">
+            @if (answerActive()) {
+              <button class="btn-ghost btn-sm" (click)="stopAnswer()">Stop</button>
+            } @else if (answer() && answer()!.status !== 'waiting') {
+              <button class="btn-ghost btn-sm" (click)="generateAnswer()">Regenerate</button>
+            }
+          </span>
+        </div>
+
+        @if (llm.status() === 'off') {
+          <p class="text-sm text-muted">
+            Get a short written answer with citations to these passages. A small AI model (~{{ llm.model().mb }}MB) downloads
+            once and runs in your browser, so your documents still never leave this device.
+          </p>
+          @if (!llm.hasWebGpu) {
+            <p class="rounded-xl bg-warn-bg p-2 text-xs">This browser has no WebGPU, so answers will run on the CPU and be very slow.</p>
+          }
+          <div class="flex flex-wrap items-center gap-3">
+            <button class="btn-primary btn-sm" (click)="enableAnswers()">Enable answers</button>
+            <ng-container *ngTemplateOutlet="modelPicker" />
+          </div>
+        } @else {
+          @if (answer(); as a) {
+            @if (a.status === 'waiting') {
+              @switch (llm.status()) {
+                @case ('loading') {
+                  @if (llm.downloadProgress() !== undefined) {
+                    <div class="space-y-1">
+                      <div class="flex justify-between text-xs text-muted">
+                        <span>Loading the answer model{{ llm.downloadMb() ? ' · ' + llm.downloadMb() + 'MB, downloaded once then cached' : '' }}</span>
+                        <span class="tabular-nums">{{ llm.downloadProgress() }}%</span>
+                      </div>
+                      <div class="h-1 overflow-hidden rounded-full bg-line">
+                        <div class="h-full bg-fg transition-all" [style.width.%]="llm.downloadProgress()"></div>
+                      </div>
+                    </div>
+                  } @else {
+                    <p class="text-sm text-muted">Loading the answer model…</p>
+                  }
+                }
+                @case ('compiling') { <p class="text-sm text-muted">Preparing the model for your {{ llm.device() === 'webgpu' ? 'GPU' : 'CPU' }} (first answer only)…</p> }
+                @default { <p class="flex items-center gap-2 text-sm text-muted"><span class="size-1.5 animate-pulse rounded-full bg-fg"></span>Reading {{ a.sources.length }} passages… <span class="tabular-nums text-subtle">{{ answerSeconds() }}s</span></p> }
+              }
+            } @else if (a.status === 'error') {
+              <p class="text-sm text-danger">The answer model failed: {{ a.error }}</p>
+            } @else if (a.status !== 'stopped' || hasWords(a.text)) {
+              <p class="text-sm leading-relaxed break-words whitespace-pre-wrap" [class.text-muted]="answerNotFound()"
+                 >@for (part of answerParts(); track $index) {@if (part.cite) {<button class="cite" (click)="openSource(part.cite)"
+                    [title]="a.sources[part.cite - 1].docName">{{ part.cite }}</button>} @else if (part.bold) {<strong class="font-semibold">{{ part.text }}</strong>} @else {{{ part.text }}}}@if (a.status === 'streaming') {<span
+                    class="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-fg align-text-bottom"></span>}</p>
+              @if (devMode() && a.status === 'streaming') { <p class="font-mono text-[11px] text-subtle">{{ llm.tokens() }} tokens…</p> }
+            }
+            @if (a.status === 'stopped') { <p class="text-xs text-subtle">Stopped.</p> }
+
+            <div class="flex flex-wrap gap-1.5">
+              @for (src of a.sources; track src.id; let i = $index) {
+                <button class="flex max-w-full cursor-pointer items-center gap-1.5 rounded-full border border-line py-0.5 pr-2.5 pl-1 text-xs
+                               text-muted transition-colors hover:border-fg hover:text-fg"
+                        [class.!border-fg]="src.id === selectedHit()?.id" (click)="openHit(src)">
+                  <span class="cite !m-0">{{ i + 1 }}</span>
+                  <span class="truncate">{{ src.docName }}{{ src.section ? ' · ' + src.section : '' }}</span>
+                </button>
+              }
+            </div>
+
+            @if (sheetResult(); as sheet) {
+              <button class="btn-secondary btn-sm" (click)="askWithSql(sheet)" [disabled]="sqlWriting()">
+                Answer from {{ sheet }} with SQL →
+              </button>
+            }
+
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-subtle">
+              <span>AI-written from the passages above. Check the cited sources.</span>
+              @if (devMode() && a.stats; as st) {
+                <span class="font-mono">{{ st.device }}/{{ st.dtype }} · prompt {{ st.promptTokens }} tok · {{ st.tokens }} tok
+                  {{ st.tokensPerSecond ? '@ ' + st.tokensPerSecond + ' tok/s' : '' }} · {{ st.ms }} ms</span>
+              }
+              <span class="ml-auto"><ng-container *ngTemplateOutlet="modelPicker" /></span>
+            </div>
+          }
+        }
+      </div>
+    </ng-template>
+
+    <ng-template #modelPicker>
+      @if (llmModels.length > 1) {
+        <label class="flex items-center gap-1.5 text-xs text-subtle">
+          Model
+          <select class="cursor-pointer rounded-md border border-line bg-bg px-1.5 py-0.5 text-xs text-fg"
+                  [value]="llm.modelId()" (change)="setModel($any($event.target).value)" [disabled]="answerActive() || sqlWriting()">
+            @for (m of llmModels; track m.id) {
+              <option [value]="m.id">{{ m.label }}, {{ m.note }} (~{{ m.mb }}MB)</option>
+            }
+          </select>
+        </label>
+      } @else {
+        <span class="text-[11px] text-subtle">{{ llm.model().label }}</span>
+      }
+    </ng-template>
 
     <!-- Highlighted text: keyword marks + closest sentence -->
     <ng-template #segs let-segments>@for (s of segments; track $index) {<span
@@ -262,6 +373,9 @@
                     *ngTemplateOutlet="segs; context: { $implicit: r.segments }" /></p>
                 }
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle">
+                  @if (sourceNumbers().get(r.id); as n) {
+                    <span class="cite" title="Source [{{ n }}] of the answer">{{ n }}</span>
+                  }
                   <span>{{ r.section ?? 'Passage ' + (r.index + 1) }}</span>
                   @if (devMode()) {
                     <span class="font-mono">rrf {{ r.score.toFixed(4) }}</span>
@@ -369,13 +483,40 @@
                               (click)="previewTable(t)">{{ t }}</button>
                     }
                   </div>
-                  <textarea class="textarea font-mono text-xs" rows="3" [value]="sql()"
-                            (input)="sql.set($any($event.target).value)"
+                  <div class="space-y-1.5">
+                    <div class="flex gap-2">
+                      <input class="input !h-9 text-sm" placeholder="Ask in plain English, e.g. total revenue by region"
+                             [value]="sqlQuestion()" (input)="sqlQuestion.set($any($event.target).value)"
+                             (keydown.enter)="writeSql()" [disabled]="sqlWriting()" />
+                      @if (sqlWriting()) {
+                        <button class="btn-secondary btn-sm h-9" (click)="stopSql()">Stop</button>
+                      } @else {
+                        <button class="btn-secondary btn-sm h-9" (click)="writeSql()" [disabled]="!sqlQuestion().trim()">Write SQL</button>
+                      }
+                    </div>
+                    @if (sqlWriting() && llm.status() === 'loading') {
+                      <p class="text-[11px] text-subtle">
+                        Loading the AI model{{ llm.downloadProgress() !== undefined ? ': downloading ' + llm.downloadProgress() + '%' : '…' }}
+                      </p>
+                    } @else if (sqlWriting() && llm.status() === 'compiling') {
+                      <p class="text-[11px] text-subtle">Preparing the AI model (first time only)…</p>
+                    } @else if (sqlWriting()) {
+                      <p class="flex items-center gap-1.5 text-[11px] text-subtle">
+                        <span class="size-1.5 animate-pulse rounded-full bg-fg"></span>Writing SQL… <span class="tabular-nums">{{ sqlSeconds() }}s</span>
+                      </p>
+                    } @else if (llm.status() === 'off') {
+                      <p class="text-[11px] text-subtle">Writes the SQL with a small AI model on this device (~{{ llm.model().mb }}MB download, one time).</p>
+                    }
+                  </div>
+                  <textarea class="textarea font-mono text-xs" rows="4" [value]="sql()"
+                            (input)="sql.set($any($event.target).value)" [readonly]="sqlWriting()"
                             (keydown.control.enter)="runSql()" (keydown.meta.enter)="runSql()"></textarea>
                   <div class="flex items-center gap-3">
-                    <button class="btn-primary btn-sm" (click)="runSql()" [disabled]="sqlRunning()">Run SQL</button>
+                    <button class="btn-primary btn-sm" (click)="runSql()" [disabled]="sqlRunning() || sqlWriting()">Run SQL</button>
                     <span class="text-xs text-subtle">Ctrl+Enter · DuckDB, in your browser</span>
                   </div>
+                  @if (sqlNote()) { <p class="text-xs text-muted">{{ sqlNote() }}</p> }
+                  @if (sqlError()) { <p class="rounded-xl bg-danger-bg p-2 font-mono text-xs break-words text-danger">{{ sqlError() }}</p> }
                   @if (sqlResult(); as r) {
                     <p class="text-xs text-subtle">
                       {{ r.total }} rows{{ r.total > r.rows.length ? ' (showing ' + r.rows.length + ')' : '' }}

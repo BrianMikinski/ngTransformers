@@ -101,6 +101,11 @@
 
 /* Surfaces. */
 @utility card { @apply rounded-2xl border border-line bg-bg p-5 sm:p-6; }
+/* Citation chip: [1] in an answer, clickable. */
+@utility cite {
+  @apply mx-0.5 inline-flex h-4 min-w-4 cursor-pointer items-center justify-center rounded bg-surface-strong px-1 align-text-top
+    text-[10px] font-semibold text-fg tabular-nums transition-colors hover:bg-fg hover:text-bg;
+}
 @utility eyebrow { @apply text-sm font-normal text-subtle; }
 
 /* Tables. */

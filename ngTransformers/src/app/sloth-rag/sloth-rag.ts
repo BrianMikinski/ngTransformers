@@ -6,6 +6,11 @@ import { DocumentParserService, ExtractedDocument, SUPPORTED_EXTENSIONS } from '
 import { EmbeddingService } from './embedding.service';
 import { SqliteStoreService } from './sqlite-store.service';
 import { DuckDbService, SqlResult } from './duckdb.service';
+import { GenerateResult, LLM_MODELS, LlmService } from './llm.service';
+import {
+  ChatMessage, SQL_PREFIX, TableSchema, answerMessages, extractSql, fixGroupBy, isNotFound, isReadOnlySql, parseAnswer, buildSources, answerCandidates,
+  sqlMessages, sqlRepairMessages,
+} from './answer-utils';
 import {
   ChunkRow, DocumentSummary, SearchHit, Segment, Span, StoredDocument,
   chunkSpans, dot, fileExtension, groupHits, highlightSegments, isStrongHit, queryTerms, splitSentences,
@@ -56,6 +61,20 @@ export interface DisplayHit extends SearchHit {
   sheets?: ViewSheet[];
 }
 
+/** The written answer for the last search. */
+interface AnswerState {
+  question: string;
+  /** Passages given to the model; citation [n] is sources[n - 1]. */
+  sources: DisplayHit[];
+  /** Result id -> citation number, including passages merged into a source. */
+  numbers: Map<number, number>;
+  text: string;
+  startedAt: number;
+  status: 'waiting' | 'streaming' | 'done' | 'stopped' | 'error';
+  error?: string;
+  stats?: GenerateResult;
+}
+
 interface DisplayChunk extends ChunkRow {
   gradient: string;
   preview: string;
@@ -81,6 +100,8 @@ export class SlothRag {
   #embedder = inject(EmbeddingService);
   #store = inject(SqliteStoreService);
   #duck = inject(DuckDbService);
+  readonly llm = inject(LlmService);
+  readonly llmModels = LLM_MODELS;
   #injector = inject(Injector);
   #host = inject<ElementRef<HTMLElement>>(ElementRef);
 
@@ -110,6 +131,25 @@ export class SlothRag {
   strongGroups = computed(() => groupHits(this.results().filter(isStrongHit)));
   weakGroups = computed(() => groupHits(this.results().filter(h => !isStrongHit(h))));
   weakCount = computed(() => this.results().filter(h => !isStrongHit(h)).length);
+  /** The question the current results (and answer) are for. */
+  askedQuery = signal('');
+
+  // Answer (RAG)
+  answer = signal<AnswerState | undefined>(undefined);
+  answerParts = computed(() => {
+    const a = this.answer();
+    return a ? parseAnswer(a.text, a.sources.length) : [];
+  });
+  answerNotFound = computed(() => this.answer()?.status === 'done' && isNotFound(this.answer()!.text));
+  answerActive = computed(() => ['waiting', 'streaming'].includes(this.answer()?.status ?? ''));
+  now = signal(Date.now());
+  answerSeconds = computed(() => Math.max(0, Math.round((this.now() - (this.answer()?.startedAt ?? this.now())) / 1000)));
+  sqlStartedAt = signal(0);
+  sqlSeconds = computed(() => Math.max(0, Math.round((this.now() - this.sqlStartedAt()) / 1000)));
+  /** Result id -> its citation number, so result cards show which [n] they are. */
+  sourceNumbers = computed(() => this.answer()?.numbers ?? new Map<number, number>());
+  /** A spreadsheet among the strong results: offer to answer with SQL instead (numbers need real arithmetic). */
+  sheetResult = computed(() => this.strongGroups().find(g => SHEET_EXTENSIONS.includes(fileExtension(g.docName)))?.docName);
 
   // Inspector
   selectedDoc = signal<string | undefined>(undefined);
@@ -124,6 +164,11 @@ export class SlothRag {
   sql = signal('');
   sqlResult = signal<SqlResult | undefined>(undefined);
   sqlRunning = signal(false);
+  sqlError = signal('');
+  /** Natural language -> SQL. */
+  sqlQuestion = signal('');
+  sqlWriting = signal(false);
+  sqlNote = signal('');
   selectedItem = computed(() => this.library().find(i => i.name === this.selectedDoc()));
   selectedTables = computed(() => this.docTables()[this.selectedDoc() ?? ''] ?? []);
   isSheet = computed(() => SHEET_EXTENSIONS.includes(this.selectedItem()?.ext ?? ''));
@@ -168,6 +213,7 @@ export class SlothRag {
   #processing = false;
   #dragDepth = 0;
   #clearTimer?: ReturnType<typeof setTimeout>;
+  #answerRun = 0;
 
   constructor() {
     this.#store.storage().catch(e => this.#error('SQLite', e));
@@ -327,6 +373,7 @@ export class SlothRag {
     this.docTables.set({});
     this.results.set([]);
     this.searched.set(false);
+    this.#clearAnswer();
     this.closeInspector();
     await this.#refreshIndex();
   }
@@ -357,6 +404,7 @@ export class SlothRag {
     if (!query || this.searching()) return;
     this.searching.set(true);
     this.showWeak.set(false);
+    this.#clearAnswer();
     try {
       const [vector] = await this.#embedder.embed([query]);
       const hits = await this.#store.search(query, vector, SEARCH_K);
@@ -388,11 +436,86 @@ export class SlothRag {
           sheets: isSheet(hit) ? sheetTables(hit.text, { terms, header: false }).map(t => compactSheet(t)) : undefined,
         };
       }));
+      this.askedQuery.set(query);
       this.searched.set(true);
     } catch (e) {
       this.#error('Search', e);
     }
     this.searching.set(false);
+    if (this.searched() && this.llm.enabled()) this.generateAnswer();
+  }
+
+  // ---------- Answer (RAG) ----------
+
+  /** The user opted in to the model download: answer the current results right away. */
+  enableAnswers() {
+    this.llm.enable();
+    if (this.searched()) this.generateAnswer();
+  }
+
+  setModel(id: string) {
+    this.llm.setModel(id);
+    if (this.answer()) this.generateAnswer();
+  }
+
+  /** Written answer from the strong results, streamed in, with [n] citations to them. */
+  async generateAnswer() {
+    const question = this.askedQuery();
+    const strong = this.results().filter(isStrongHit);
+    const candidates = answerCandidates(strong);
+    const built = buildSources(candidates.length ? candidates : strong.slice(0, 1));
+    const sources = built.map(s => s.hit);
+    if (!question || !sources.length) {
+      this.answer.set(undefined);
+      return;
+    }
+    const run = ++this.#answerRun;
+    const current = () => run === this.#answerRun;
+    const numbers = new Map(built.flatMap((s, i) => s.hits.map(h => [h.id, i + 1] as const)));
+    this.answer.set({ question, sources, numbers, text: '', status: 'waiting', startedAt: Date.now() });
+    // Reading the passages can take a while on slow GPUs: tick a seconds counter so it visibly progresses.
+    const ticker = setInterval(() => this.now.set(Date.now()), 1000);
+    try {
+      const stats = await this.llm.generate(
+        answerMessages(question, built),
+        {
+          maxNewTokens: 240,
+          onToken: t => current() && this.answer.update(a => a && { ...a, text: a.text + t, status: 'streaming' }),
+        },
+      );
+      if (current()) {
+        this.answer.update(a => a && { ...a, text: stats.text.trim(), status: stats.interrupted ? 'stopped' : 'done', stats });
+      }
+    } catch (e) {
+      if (current()) this.answer.update(a => a && { ...a, status: 'error', error: message(e) });
+    } finally {
+      clearInterval(ticker);
+    }
+  }
+
+  stopAnswer() {
+    this.llm.stop();
+  }
+
+  openSource(n: number) {
+    const hit = this.answer()?.sources[n - 1];
+    if (hit) this.openHit(hit);
+  }
+
+  #clearAnswer() {
+    this.#answerRun++;
+    if (this.answerActive()) this.llm.stop();
+    this.answer.set(undefined);
+  }
+
+  /** From the Ask pane: answer the question with SQL over a spreadsheet in the results. */
+  async askWithSql(docName: string) {
+    this.sqlQuestion.set(this.askedQuery());
+    this.selectedHit.set(undefined);
+    this.mobileTab.set('source');
+    await this.#selectDoc(docName);
+    await this.setTab('sql');
+    await this.writeSql();
   }
 
   // ---------- Inspector ----------
@@ -423,6 +546,8 @@ export class SlothRag {
     this.storedDoc.set(undefined);
     this.docChunks.set([]);
     this.sqlResult.set(undefined);
+    this.sqlError.set('');
+    this.sqlNote.set('');
     this.selectedTable.set(undefined);
   }
 
@@ -443,13 +568,113 @@ export class SlothRag {
 
   async runSql() {
     if (!this.sql().trim()) return;
+    this.sqlNote.set('');
+    await this.#runSql().catch(() => undefined); // the error is shown under the editor
+  }
+
+  /** Runs the editor's SQL; errors are shown under the editor (sqlError) and rethrown. */
+  async #runSql() {
     this.sqlRunning.set(true);
+    this.sqlError.set('');
     try {
       this.sqlResult.set(await this.#duck.query(this.sql()));
     } catch (e) {
-      this.#error('SQL', e);
+      this.sqlResult.set(undefined);
+      this.sqlError.set(message(e));
+      throw e;
+    } finally {
+      this.sqlRunning.set(false);
     }
-    this.sqlRunning.set(false);
+  }
+
+  /**
+   * Natural language -> SQL with the answer model, using the selected spreadsheet's tables (columns plus
+   * a few example rows). The SQL lands in the editor, runs if it only reads, and gets one repair attempt
+   * if DuckDB rejects it.
+   */
+  async writeSql() {
+    const question = this.sqlQuestion().trim();
+    const name = this.selectedDoc();
+    if (!question || !name || this.sqlWriting()) return;
+    this.sqlWriting.set(true);
+    this.sqlStartedAt.set(Date.now());
+    this.now.set(Date.now());
+    const ticker = setInterval(() => this.now.set(Date.now()), 1000);
+    this.sqlNote.set('');
+    this.sqlError.set('');
+    try {
+      await this.#ensureTables(name);
+      const tables = this.docTables()[name] ?? [];
+      if (!tables.length) throw new Error('No tables to query: add the spreadsheet again.');
+      const schemas: TableSchema[] = await Promise.all(tables.map(async table => ({
+        table,
+        columns: await this.#duck.columns(table),
+        sample: (await this.#duck.query(`SELECT * FROM "${table}" LIMIT 3`)).rows,
+      })));
+
+      let messages = sqlMessages(question, schemas);
+      let sql = await this.#writeSqlOnce(messages);
+      if (!sql) return;
+      if (!isReadOnlySql(sql)) {
+        this.sqlNote.set('Not run automatically: only SELECT queries run on their own. Check it, then press Run SQL.');
+        return;
+      }
+      const check = ' Check it before trusting the numbers.';
+      if (await this.#tryRun(sql, question)) {
+        this.sqlNote.set(`SQL written by the AI model${this.#autoFixed ? ', with a GROUP BY mistake fixed automatically' : ''}.${check}`);
+        return;
+      }
+      // Small models often get a column name or function wrong: show it the error and try once more.
+      messages = sqlRepairMessages(messages, sql, this.sqlError());
+      sql = await this.#writeSqlOnce(messages);
+      if (!sql || !isReadOnlySql(sql)) return;
+      this.sqlNote.set(await this.#tryRun(sql, question)
+        ? `SQL written by the AI model (second try, after an error).${check}`
+        : 'The AI model could not write a working query. Try rephrasing, or edit the SQL.');
+    } catch (e) {
+      this.#error('Write SQL', e);
+    } finally {
+      this.sqlWriting.set(false);
+      clearInterval(ticker);
+    }
+  }
+
+  stopSql() {
+    this.llm.stop();
+  }
+
+  #autoFixed = false;
+
+  /** Runs `sql`; if DuckDB rejects it for the classic GROUP BY mistake, fixes that in code and runs again. */
+  async #tryRun(sql: string, question: string): Promise<boolean> {
+    this.#autoFixed = false;
+    this.sql.set(sql);
+    try {
+      await this.#runSql();
+      return true;
+    } catch (e) {
+      const fixed = fixGroupBy(sql, message(e), question);
+      if (!fixed) return false;
+      this.sql.set(fixed);
+      this.#autoFixed = true;
+      return this.#runSql().then(() => true, () => false);
+    }
+  }
+
+  /** Streams the model's SQL into the editor, then cleans it up. Returns '' if it was stopped. */
+  async #writeSqlOnce(messages: ChatMessage[]): Promise<string> {
+    this.sql.set('');
+    this.sqlResult.set(undefined);
+    this.sqlError.set('');
+    let raw = '';
+    const result = await this.llm.generate(messages, {
+      maxNewTokens: 200,
+      prefix: SQL_PREFIX,
+      onToken: t => this.sql.set(extractSql(raw += t)),
+    });
+    const sql = extractSql(result.text);
+    this.sql.set(sql);
+    return result.interrupted ? '' : sql;
   }
 
   async #selectDoc(name: string) {
@@ -458,6 +683,8 @@ export class SlothRag {
     this.storedDoc.set(undefined);
     this.docChunks.set([]);
     this.sqlResult.set(undefined);
+    this.sqlError.set('');
+    this.sqlNote.set('');
     this.selectedTable.set(undefined);
     await this.#reloadInspector(name);
   }
@@ -542,6 +769,10 @@ export class SlothRag {
     } catch (e) {
       if (this.storage() !== 'moved') this.#error('SQLite', e);
     }
+  }
+
+  hasWords(text: string): boolean {
+    return /\w/.test(text);
   }
 
   #error(context: string, e: unknown) {

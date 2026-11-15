@@ -104,11 +104,36 @@ Notes from testing phase 2:
 - "how many vacation days do I get" finds the handbook's "25 days of paid time off" with no word overlap.
 - Markdown inline syntax (`**bold**`, links) is still shown raw.
 
-### Phase 3 – Answers (RAG)
+### Phase 3 – Answers (RAG) ✅
 
-- [ ] In-browser LLM (WebGPU, small instruct model) answers from the top passages with `[n]` citations.
-- [ ] Citations open the passage in the inspector.
-- [ ] Spreadsheet questions: natural language → SQL (shown, editable) → DuckDB.
+- [x] In-browser LLM answers from the top passages with `[n]` citations: **Qwen3 0.6B** (q4f16 on WebGPU,
+      ~570MB, int8 on WASM without WebGPU) in its own worker (`llm.worker.ts`), streamed token by token,
+      with Stop / Regenerate. Opt-in: nothing downloads until "Enable answers".
+- [x] Citations open the passage in the inspector; result cards show which `[n]` they are.
+- [x] Answer sources are stricter than the result list (`answerCandidates`: close in meaning to the best
+      hit, or a top-2 keyword match), overlapping passages of one document are merged into one continuous
+      source, and a leading half-sentence is dropped (`buildSources`, `tidy`).
+- [x] Spreadsheet questions: natural language → SQL (streamed into the editor, editable) → DuckDB, from the
+      SQL tab or "Answer from q3-sales.xlsx with SQL" on the answer card. The reply is pre-started with
+      "```sql SELECT", the prompt has worked examples on the sheet's own columns, the classic GROUP BY
+      mistake is fixed in code (`fixGroupBy`), and other DuckDB errors get one repair round. Only
+      SELECT/WITH queries run automatically.
+
+Notes from testing phase 3 (Intel gen-9 integrated GPU, WebGPU with shader-f16):
+- **Model choice was the hard part.**
+  - Qwen2.5 0.5B/1.5B: activations overflow fp16, so q4f16 wrote garbage ("10 days/weeks/year/year/…");
+    q4 (fp32) was correct but ~30s just to read the prompt.
+  - Qwen3 1.7B (q4f16, 1.4GB): onnxruntime-web aborts while loading (out of WASM memory).
+  - Qwen3 0.6B q4f16 works, `enable_thinking: false`.
+- Qwen's `generation_config` sets `repetition_penalty: 1.1`, which also penalizes prompt tokens, so the
+  model avoided copying facts from the sources. Forced to 1.0.
+- Speed on that GPU: prompt reading ~25 tokens/s, generation ~4 tokens/s → 17–45s per answer
+  (sources capped at 4 passages / 2,000 chars). A seconds counter shows it's alive.
+- Quality: right on "how many vacation days do I get" (25 days [1]), "how much over budget is Kestrel"
+  ($3,500), "which region had the highest revenue in September" (SQL → West, 88,000), "total deals per
+  rep" (SQL + GROUP BY fix). Citations are sometimes skipped; the source chips are always shown.
+- One model, one queue: writing SQL interrupts a running answer, but only between tokens, so it can
+  wait for the answer's prompt reading to finish.
 
 ### Phase 4 – Keep and reuse
 
@@ -118,5 +143,7 @@ Notes from testing phase 2:
 
 ## Open questions
 
-- Which small LLM gives acceptable answers on WebGPU without a multi-GB download?
+- ~~Which small LLM gives acceptable answers on WebGPU without a multi-GB download?~~ Qwen3 0.6B for
+  now (see phase 3 notes). Worth retrying a 1–2B model with the external-data ONNX format (avoids the
+  WASM memory abort), and offering it as "better answers" for machines with a discrete GPU.
 - Should collections map to separate SQLite files or a `collection` column?

@@ -8,8 +8,8 @@ const MAX_ROWS = 500;
 
 /**
  * DuckDB-WASM, fully in the browser. The worker + wasm are self-hosted (copied to /duckdb by
- * angular.json), and the JS is dynamically imported, so nothing loads until the first spreadsheet.
- * Tables live in memory only: re-upload spreadsheets after a page reload.
+ * angular.json), and the JS is dynamically imported, so nothing loads until SQL is first used.
+ * Tables live in memory only; the component rebuilds them from the sheets stored in SQLite.
  */
 @Injectable({ providedIn: 'root' })
 export class DuckDbService {
@@ -34,6 +34,14 @@ export class DuckDbService {
       SELECT table_name, string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position)
       FROM information_schema.columns GROUP BY table_name ORDER BY table_name`);
     return r.rows.map(([table, columns]) => ({ table, columns }));
+  }
+
+  /** Column names and types, for prompting the SQL model. */
+  async columns(table: string): Promise<{ name: string; type: string }[]> {
+    const r = await this.query(`
+      SELECT column_name, data_type FROM information_schema.columns
+      WHERE table_name = '${table.replace(/'/g, "''")}' ORDER BY ordinal_position`);
+    return r.rows.map(([name, type]) => ({ name, type }));
   }
 
   async query(sql: string): Promise<SqlResult> {
