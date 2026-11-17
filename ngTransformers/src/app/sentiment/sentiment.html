@@ -1,0 +1,20 @@
+<section class="mx-auto max-w-5xl space-y-8 px-4 py-12 sm:px-6 sm:py-16">
+  <div class="space-y-3">
+    <h1>Sentiment analysis</h1>
+    <p class="max-w-2xl text-lg text-muted">
+      Classify text as positive or negative with a DistilBERT model running in your browser via Transformers.js.
+    </p>
+  </div>
+
+  <div class="card space-y-4">
+    <textarea class="textarea" [(ngModel)]="inputText" rows="4" placeholder="Type something..."></textarea>
+    <button class="btn-primary" (click)="analyze()">Run sentiment analysis</button>
+  </div>
+
+  @if (result()) {
+    <div class="card">
+      <p class="mb-2 text-sm text-muted">Result</p>
+      <pre class="overflow-auto font-mono text-sm">{{ result() | json }}</pre>
+    </div>
+  }
+</section>

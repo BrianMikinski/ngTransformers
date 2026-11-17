@@ -1,0 +1,87 @@
+import { Injectable } from '@angular/core';
+import { DocType } from './rag-utils';
+
+export interface ExtractedDocument {
+  name: string;
+  type: DocType;
+  text: string;
+  ms: number;
+  /** Spreadsheets only: one CSV per sheet, for loading into DuckDB. */
+  sheets?: { name: string; csv: string }[];
+}
+
+/** File extensions parse() understands (lowercase, no dot). */
+export const SUPPORTED_EXTENSIONS = ['pdf', 'docx', 'xlsx', 'xls', 'csv', 'txt', 'md', 'markdown'];
+
+/**
+ * Phase 1 of Sloth RAG: turn a dropped file into plain text, entirely in the browser.
+ * Each parser is dynamically imported so it only downloads when first needed.
+ */
+@Injectable({ providedIn: 'root' })
+export class DocumentParserService {
+
+  async parse(file: File): Promise<ExtractedDocument> {
+    const start = performance.now();
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    const data = await file.arrayBuffer();
+
+    let type: ExtractedDocument['type'];
+    let text: string;
+    let sheets: ExtractedDocument['sheets'];
+
+    if (ext === 'pdf') {
+      type = 'pdf';
+      text = await this.parsePdf(data);
+    } else if (ext === 'docx') {
+      type = 'word';
+      text = await this.parseDocx(data);
+    } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
+      type = 'excel';
+      sheets = await this.parseSpreadsheet(data);
+      text = sheets.map(s => `--- Sheet: ${s.name} ---\n${s.csv}`).join('\n\n');
+    } else if (ext === 'txt') {
+      type = 'text';
+      text = new TextDecoder().decode(data);
+    } else if (['md', 'markdown'].includes(ext)) {
+      // Kept as raw markdown: headings are useful structure for chunking later.
+      type = 'markdown';
+      text = new TextDecoder().decode(data);
+    } else {
+      throw new Error(`Unsupported file type: .${ext}`);
+    }
+
+    return { name: file.name, type, text, sheets, ms:Math.round(performance.now() - start) };
+  }
+
+  private async parsePdf(data: ArrayBuffer): Promise<string> {
+    const pdfjs = await import('pdfjs-dist');
+    // Worker file is copied to the build output by angular.json "assets".
+    pdfjs.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.mjs';
+
+    const pdf = await pdfjs.getDocument({ data }).promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const content = await (await pdf.getPage(i)).getTextContent();
+      // Keep pdf.js line breaks so the document viewer shows lines, not one blob per page.
+      const pageText = content.items
+        .map(item => ('str' in item ? item.str + (item.hasEOL ? '\n' : ' ') : ''))
+        .join('')
+        .replace(/[ \t]+\n/g, '\n')
+        .trim();
+      pages.push(`--- Page ${i} ---\n${pageText}`);
+    }
+    return pages.join('\n\n');
+  }
+
+  private async parseDocx(arrayBuffer: ArrayBuffer): Promise<string> {
+    const mammoth = (await import('mammoth')).default;
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    return result.value;
+  }
+
+  private async parseSpreadsheet(data: ArrayBuffer): Promise<{ name: string; csv: string }[]> {
+    const XLSX = await import('xlsx');
+    const workbook = XLSX.read(data, { type: 'array' });
+    return workbook.SheetNames.map(name => ({ name, csv: XLSX.utils.sheet_to_csv(workbook.Sheets[name]) }));
+  }
+}
